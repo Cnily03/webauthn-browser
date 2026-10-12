@@ -1,0 +1,22 @@
+[package]
+name = "userland-hid-hook"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+default = []
+# Explicit build-only native test adapter. Never enabled by environment.
+simulation = []
+
+[dependencies]
+libc = "=0.2.190"
+
+[profile.dev]
+panic = "abort"
+[profile.release]
+panic = "abort"

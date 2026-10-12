@@ -1,0 +1,24 @@
+{
+  "keys": [
+    {
+      "id": "legacy-usb",
+      "name": "Legacy preserved key",
+      "attachment": "cross-platform",
+      "enabled": true,
+      "automatic_presence": true,
+      "simulated_uv": true,
+      "credentials": [
+        {
+          "credentialId": "AQIDBA==",
+          "rpId": "example.test",
+          "userHandle": "bGVnYWN5LXVzZXI=",
+          "isResidentCredential": true,
+          "privateKey": "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgn/VBO1caP2Za1DtscTklvzjNWkN3E+KDNklIIcra+GKhRANCAATLUz6BCPy743GsP7/5t4kqa/jyB1XStLVJqlBlTA2jNS5ERUKf8DHyxowdxFH5ZeGv1Pex/dhFjyo7hjFdF2B6",
+          "signCount": 41
+        }
+      ]
+    }
+  ],
+  "vnc_password_hash": "preserved-vnc-hash",
+  "settings_password_hash": "preserved-settings-hash"
+}

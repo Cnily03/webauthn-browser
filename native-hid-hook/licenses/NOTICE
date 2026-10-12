@@ -1,0 +1,5 @@
+libc 0.2.190: MIT OR Apache-2.0, https://github.com/rust-lang/libc
+Pinned by ../Cargo.lock. Both published license texts are retained here.
+The hook source and source-included ../src/fido-relay/src/control.rs use MIT.
+System libudev/glibc are dynamically used; their upstream Debian notices remain
+under /usr/share/doc in the image. No Chromium source is compiled into this hook.

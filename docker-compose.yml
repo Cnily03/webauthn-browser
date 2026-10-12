@@ -1,0 +1,14 @@
+services:
+  webauthn-browser:
+    image: webauthn-browser
+    build: .
+    restart: unless-stopped
+    command: ["--no-sandbox"]
+    volumes:
+      - "./.data:/data"
+      - "./downloads:/downloads:ro"
+    tmpfs:
+      - "/data/run:uid=10001,gid=10001,mode=0700"
+      - "/tmp/webauthn-browser-cache:uid=10001,gid=10001,mode=0700"
+    ports:
+      - "8080:8080"

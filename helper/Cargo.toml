@@ -1,0 +1,77 @@
+[package]
+name = "webauthn-helper"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+build = "build.rs"
+default-run = "webauthn-helper"
+
+[features]
+default = []
+# Enables fake-only fixtures; leave disabled in production builds.
+test-support = []
+desktop = ["dep:eframe"]
+
+[[bin]]
+name = "webauthn-helper"
+path = "src/bin/webauthn-helper.rs"
+
+[[bin]]
+name = "webauthn-helper-desktop"
+path = "src/bin/webauthn-helper-desktop.rs"
+required-features = ["desktop"]
+
+[[example]]
+name = "controller-fixture"
+path = "tests/fixtures/controller.rs"
+required-features = ["desktop", "test-support"]
+test = false
+
+[[example]]
+name = "logging-fixture"
+path = "tests/fixtures/logging.rs"
+required-features = ["desktop", "test-support"]
+test = false
+
+[dependencies]
+eframe = { version = "0.33", optional = true, default-features = false, features = ["default_fonts", "glow", "x11"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.29"
+axum = { version = "0.7", features = ["ws"] }
+base64 = "0.22"
+btleplug = "0.11"
+futures-util = "0.3"
+fido-report-relay = { path = "../src/fido-relay" }
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+subtle = "2"
+tracing-appender = "=0.2.5"
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["ansi", "fmt", "registry", "std", "time"] }
+tokio = { version = "1", features = ["full"] }
+url = "2"
+uuid = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# Official vendored HIDAPI C backend; native backend has ambiguous immediate write counts.
+hidapi = { version = "=2.6.7", default-features = false }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_JobObjects", "Win32_Security"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+hidapi = { version = "=2.6.7", default-features = false, features = ["linux-native-basic-udev"] }
+# Bundle libdbus in the executable; the host still requires BlueZ and D-Bus.
+dbus = { version = "0.9", features = ["vendored"] }
+
+[dev-dependencies]
+tokio-tungstenite = "0.24"
+tower = { version = "0.5", features = ["util"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

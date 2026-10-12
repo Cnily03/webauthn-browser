@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "WebAuthn Browser Request Broker",
+  "version": "1.0.29",
+  "minimum_chrome_version": "115",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA1MPErSlLp331dbEmsxOV7kXpqtfdiNisRcmbwiR9Tup27tdBkiZ/ecJoT6IxqjQ5OpAxw+77TpK8ZbMkWi2ANKLF/eE1DgXfRCJMnl0H85iz0DNoO7hLeeGrHWftOgWCsi4AQCY6HlN5YbvvdwmzyFy8+DAYc5GAB+18TDzTQL6/0JZzO1s8ybfMg0ql4usitMAgl9wjKTXpR1jmqLbTCQWrctX9ErM9IJZdBSW6MxloxuRaXzD8x29g1U8xbHj8k2tgidQJ7sMjt2MKHq53c5/xQztnXZ9Vz9v6mf4KpaGjB/yvCJ6kZfV4k0W/eQ/W0friVI4PW7eqJwlC+SWKJwIDAQAB",
+  "permissions": [
+    "webAuthenticationProxy",
+    "nativeMessaging",
+    "alarms",
+    "webNavigation",
+    "webRequest",
+    "tabs",
+    "tabGroups"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ]
+}

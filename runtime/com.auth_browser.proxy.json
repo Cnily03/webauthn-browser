@@ -1,0 +1,9 @@
+{
+  "name": "com.auth_browser.proxy",
+  "description": "WebAuthn Browser private WebAuthn broker",
+  "path": "/opt/webauthn-browser/runtime/native-proxy-host",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://hjfbndgjlhfjaplmakeicgoibanbncaf/"
+  ]
+}

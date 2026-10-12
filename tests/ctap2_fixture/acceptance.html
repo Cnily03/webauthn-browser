@@ -1,0 +1,32 @@
+<!doctype html><meta charset="utf-8"><title>Disposable CTAP2 browser acceptance</title>
+<style>body{font:18px system-ui;max-width:48rem;margin:3rem auto}button{font:inherit;padding:.5rem;margin-right:1rem}pre{white-space:pre-wrap}strong{color:#922}</style>
+<h1>Disposable CTAP2 browser acceptance</h1>
+<p><strong>Test-only software authenticator. Presence is simulated. No real accounts, keys, or USB device.</strong></p>
+<p>Use only this localhost page. Registration and assertion must travel through Chromium’s unchanged external security-key path. No browser virtual-authenticator/CDP API is used.</p>
+<button id="create">1. Create synthetic credential</button><button id="get" disabled>2. Verify signed assertion</button><pre id="status">Waiting for a deliberate click. Browser acceptance has not passed.</pre>
+<script>
+'use strict';
+const config=__CONFIG__;
+const status=document.getElementById('status');
+const decode=s=>Uint8Array.from(atob(s.replace(/-/g,'+').replace(/_/g,'/')),c=>c.charCodeAt(0));
+const encode=buffer=>btoa(String.fromCharCode(...new Uint8Array(buffer))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+let credentialId;
+async function post(data){const r=await fetch('/result',{method:'POST',headers:{'Content-Type':'application/json','X-Fixture-Token':config.token},body:JSON.stringify(data)});const result=await r.json();if(!r.ok)throw Error(result.error);status.textContent=JSON.stringify(result,null,2);}
+document.getElementById('create').onclick=async()=>{
+ document.getElementById('create').disabled=true;
+ try{
+  status.textContent='Waiting for Chromium’s native security-key ceremony.';
+  const c=await navigator.credentials.create({publicKey:{challenge:decode(config.create),rp:{id:'localhost',name:'Disposable loopback fixture'},user:{id:new TextEncoder().encode('synthetic-user'),name:'fixture',displayName:'Synthetic fixture'},pubKeyCredParams:[{type:'public-key',alg:-7}],authenticatorSelection:{authenticatorAttachment:'cross-platform',residentKey:'discouraged',userVerification:'discouraged'},attestation:'direct',timeout:60000}});
+  await post({kind:'create',rawId:encode(c.rawId),clientDataJSON:encode(c.response.clientDataJSON),attestationObject:encode(c.response.attestationObject)});
+  credentialId=c.rawId;document.getElementById('get').disabled=false;
+ }catch(error){status.textContent=error.name+': '+error.message;}
+};
+document.getElementById('get').onclick=async()=>{
+ document.getElementById('get').disabled=true;
+ try{
+  status.textContent='Waiting for Chromium’s native assertion ceremony.';
+  const c=await navigator.credentials.get({publicKey:{challenge:decode(config.get),rpId:'localhost',allowCredentials:[{type:'public-key',id:credentialId,transports:['usb']}],userVerification:'discouraged',timeout:60000}});
+  await post({kind:'get',rawId:encode(c.rawId),clientDataJSON:encode(c.response.clientDataJSON),authenticatorData:encode(c.response.authenticatorData),signature:encode(c.response.signature)});
+ }catch(error){status.textContent=error.name+': '+error.message;}
+};
+</script>

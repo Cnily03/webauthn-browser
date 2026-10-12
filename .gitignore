@@ -1,0 +1,25 @@
+/target/
+.env
+.env.*
+__pycache__/
+*.pyc
+*.log
+/data/
+/.data/
+/artifacts/
+
+/history.bundle
+
+/web/node_modules/
+/web/coverage/
+/web/*.tsbuildinfo
+/web/dist/
+
+/helper/target/
+
+# Release downloads are generated locally and bundled in the source ZIP, never Git.
+/downloads/
+
+/src/fido-relay/target/
+
+/native-hid-hook/target/

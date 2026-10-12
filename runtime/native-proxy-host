@@ -1,0 +1,3 @@
+#!/bin/sh
+# Chromium supplies the caller origin; the manifest pins our extension ID.
+exec /usr/local/bin/webauthn-browser --native-proxy "$@"

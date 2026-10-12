@@ -1,0 +1,82 @@
+name: Helper
+on:
+  workflow_dispatch:
+  push:
+    paths: ['helper/**', 'src/fido-relay/**', 'tests/helper_cli_pty_smoke.py', '.github/workflows/helper.yml']
+  pull_request:
+    paths: ['helper/**', 'src/fido-relay/**', 'tests/helper_cli_pty_smoke.py', '.github/workflows/helper.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            targets: x86_64-unknown-linux-gnu
+            ext: ''
+          - os: windows-latest
+            platform: windows-x86_64
+            targets: x86_64-pc-windows-msvc
+            ext: '.exe'
+          - os: macos-latest
+            platform: macos-universal
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+            ext: ''
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: helper
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+          components: rustfmt, clippy
+
+      - run: cargo fmt --check
+      - run: cargo test --locked --features desktop
+      - run: cargo clippy --locked --features desktop --all-targets -- -D warnings
+
+      - name: Verify inline terminal approval on a real PTY
+        if: runner.os == 'Linux'
+        run: |
+          python3 -m pip install --user 'websockets==16.0'
+          python3 ../tests/helper_cli_pty_smoke.py --binary "$PWD/target/debug/webauthn-helper"
+
+      - name: Build target executables
+        run: |
+          for target in $(echo '${{ matrix.targets }}' | tr ',' ' '); do
+            cargo build --locked --release --features desktop --bins --target "$target"
+          done
+
+      - name: Package CLI and real Desktop executables
+        id: package
+        run: |
+          mkdir -p dist
+          for binary in $(python3 -c "import tomllib; print(' '.join(b['name'] for b in tomllib.load(open('Cargo.toml', 'rb')).get('bin', [])))"); do
+            output="dist/$binary-${{ matrix.platform }}${{ matrix.ext }}"
+            if [ '${{ matrix.platform }}' = macos-universal ]; then
+              # macOS universal binary
+              lipo -create "target/aarch64-apple-darwin/release/$binary" "target/x86_64-apple-darwin/release/$binary" -output "$output"
+              lipo -verify_arch arm64 x86_64 "$output"
+            else
+              cp "target/${{ matrix.targets }}/release/$binary${{ matrix.ext }}" "$output"
+            fi
+          done
+          python3 -c "import hashlib,pathlib; d=pathlib.Path('dist'); (d/'SHA256SUMS').write_text(''.join(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.name+'\n' for p in sorted(d.glob('*')) if p.is_file()))"
+          cp README.md THIRD_PARTY_LICENSES.txt dist/
+          cp ../LICENSE dist/LICENSE
+          package_name="$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['package']['name'])")"
+          echo "package_name=$package_name" >> $GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.package_name }}-${{ matrix.platform }}
+          path: helper/dist/*
+          if-no-files-found: error

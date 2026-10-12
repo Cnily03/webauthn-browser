@@ -1,0 +1,140 @@
+:root { font-synthesis: none; color-scheme: light; }
+* { box-sizing: border-box; }
+html, body, #root { min-width: 280px; min-height: 100%; margin: 0; }
+body { margin: 0; }
+[hidden] { display: none !important; }
+button, a, input, textarea { -webkit-tap-highlight-color: transparent; }
+button, a { touch-action: manipulation; }
+a { text-underline-offset: 3px; }
+
+.navigation-group nav { white-space: nowrap; }
+.navigation-group nav .MuiButton-root { font-size: 13px; min-width: 48px; padding: 5px 11px; }
+.navigation-group nav .current-route { background: var(--mui-palette-action-selected); color: var(--mui-palette-primary-main); }
+
+.browser-controls .MuiButton-root { font-size: 12px; min-width: auto; padding-inline: 7px; }
+.connection { min-width: 0; padding-right: 5px; }
+.connection .MuiTypography-root { overflow: hidden; text-overflow: ellipsis; max-width: 164px; }
+
+.settings-route, .downloads-route { padding-top: 84px; padding-bottom: 48px; }
+.settings-page, .downloads-page { max-width: 1200px; padding: 24px 36px 40px; margin: 0 auto; }
+.settings-heading { margin-bottom: 32px; }
+.settings-heading .MuiTypography-overline { letter-spacing: .1em; font-size: 11px; }
+
+.section-nav { position: sticky; top: 90px; padding: 6px; }
+.section-nav .MuiListItemButton-root { border-radius: 6px; padding: 8px 12px; margin: 3px 0; }
+.section-nav .MuiListItemText-primary { font-size: 13px; }
+
+.settings-sections { min-width: 0; }
+.section-heading { margin-bottom: 24px; }
+.section-heading > .MuiTypography-body2 { margin-top: 8px; }
+.section-heading > .MuiButton-root { flex-shrink: 0; }
+
+.security-card { padding: 24px; }
+.security-footnote.MuiAlert-root { margin-top: 24px; }
+.security-card .MuiChip-root { flex-shrink: 0; }
+
+.settings-loading { padding: 36px 0; }
+
+.keys-list { padding: 5px; }
+.keys-list .MuiListItemButton-root { padding: 8px 11px; border: 1px solid transparent; border-radius: 6px; margin-bottom: 4px; }
+.keys-list .MuiListItemButton-root:last-child { margin-bottom: 0; }
+
+.keys-list .MuiListItemText-root { min-width: 0; }
+.key-detail { min-width: 0; }
+.key-card, .key-form { padding: 24px; }
+.key-controls .MuiFormControlLabel-root { margin-left: -10px; margin-right: 0; }
+.key-controls .MuiButton-root { flex-shrink: 0; }
+.key-controls { flex-wrap: wrap; row-gap: 12px; }
+.form-grid > *, .aaguid-field > .MuiTextField-root { min-width: 0; }
+.aaguid-field > .MuiIconButton-root { flex-shrink: 0; width: 36px; height: 36px; border: 1px solid var(--mui-palette-divider); border-radius: 8px; }
+.key-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px 18px; }
+.form-fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.form-fieldset > legend { float: left; padding: 0; width: 100%; }
+.form-fieldset > legend + * { clear: both; }
+.form-actions { padding-top: 4px; }
+.detail-grid { margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px 24px; }
+.detail-grid > div { min-width: 0; }
+.detail-grid dd { margin: 4px 0 0; overflow-wrap: anywhere; }
+.empty-keys { text-align: center; padding: 48px 32px; }
+.empty-keys .MuiTypography-body2 { max-width: 360px; margin: 10px auto 0; }
+.empty-key-symbol { font-size: 46px !important; color: var(--mui-palette-text-secondary); margin-bottom: 12px !important; line-height: 1 !important; }
+.backup-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.backup-row > :first-child { max-width: 420px; }
+.backup-row > :last-child { flex-shrink: 0; }
+.login-page { min-height: 100dvh; display: grid; place-items: center; padding: 104px 20px 40px; }
+.settings-route .login-page, .downloads-route .login-page { min-height: calc(100dvh - 132px); padding-top: 32px; }
+.login-card { width: min(100%, 420px); padding: 36px; }
+.login-card .MuiTypography-h1 { font-size: 1.65rem; }
+.page-loading { min-height: 70dvh; padding: 100px 24px; }
+.page-error { min-height: 75dvh; display: grid; place-items: center; padding: 100px 24px 32px; }
+.page-error > .MuiPaper-root { max-width: 520px; padding: 32px; display: grid; gap: 20px; }
+.desktop { position: fixed; inset: 0; z-index: 0; background: var(--mui-palette-background-default); overflow: hidden; }
+.vnc-screen { position: absolute; inset: 0; width: 100%; height: 100%; overflow: hidden; }
+.vnc-screen > div { width: 100%; height: 100%; }
+/* noVNC owns these body children. Keep remote visuals below every app surface;
+   never hide the OS cursor on body, controls, portal roots or the whole desktop. */
+body > canvas[data-vnc-cursor] { z-index: 2 !important; pointer-events: none !important; }
+body > canvas[data-vnc-cursor]:not([data-vnc-cursor-active]) { visibility: hidden !important; }
+#noVNC_mouse_capture_elem[data-vnc-capture] { z-index: 1 !important; }
+.vnc-screen[data-vnc-local-cursor] canvas,
+#noVNC_mouse_capture_elem[data-vnc-local-cursor] { cursor: auto !important; }
+.vnc-placeholder { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; pointer-events: none; color: var(--mui-palette-grey-300); background: transparent; border: 0; box-shadow: none; }
+.vnc-placeholder > .MuiTypography-root { max-width: 440px; text-align: center; }
+.request-status { position: fixed; right: 16px; top: 68px; z-index: 10; max-width: calc(100% - 32px); }
+.request-status > .MuiPaper-root, .request-status > .MuiStack-root { background: var(--mui-palette-background-paper); border: 1px solid var(--mui-palette-divider); border-radius: 7px; }
+.MuiDialogContent-root { overflow-wrap: anywhere; }
+.MuiSnackbar-root { max-width: calc(100% - 32px); }
+@media (max-width: 1199.95px) {
+
+  .browser-controls .connection-label { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .settings-page, .downloads-page { padding-inline: 28px; }
+
+  .backup-row { align-items: flex-start; flex-direction: column; }
+}
+@media (max-width: 899.95px) {
+
+  .settings-page, .downloads-page { padding: 20px 24px 32px; }
+
+  .section-nav { position: static; margin-bottom: 28px; padding: 4px; }
+  .section-nav .MuiList-root { display: flex; gap: 4px; }
+  .section-nav .MuiListItemButton-root { flex: 0 1 150px; justify-content: center; margin: 0; text-align: center; }
+  .settings-heading { margin-bottom: 24px; }
+
+}
+@media (max-width: 599.95px) {
+
+  .navigation-group nav { gap: 0; }
+  .navigation-group nav .MuiButton-root { min-width: 44px; font-size: 12px; padding: 5px 8px; }
+  .navigation-group nav .lock-button { padding-inline: 4px; font-size: 11px; }
+
+  .browser-controls .connection { display: flex; padding: 4px; }
+  .browser-controls .auth-connection { margin-right: auto; }
+  .browser-controls .connection .MuiTypography-root { font-size: 10px; max-width: 124px; }
+  .browser-controls .ctrl-alt-delete { display: inline-flex; font-size: 10px; }
+  .browser-controls .MuiButton-root { font-size: 11px; padding-inline: 5px; }
+
+  .settings-route, .downloads-route { padding-top: 70px; }
+  .settings-page, .downloads-page { padding: 16px 16px 28px; }
+  .settings-heading .MuiTypography-h1 { font-size: 1.75rem; }
+
+  .security-card { padding: 20px; }
+
+  .keys-list .MuiList-root { display: flex; overflow-x: auto; gap: 4px; padding-bottom: 3px; }
+  .keys-list .MuiListItemButton-root { flex: 0 0 160px; margin-bottom: 0; }
+  .key-card, .key-form { padding: 20px 16px; }
+  .form-grid { grid-template-columns: minmax(0, 1fr); }
+  .detail-grid { grid-template-columns: minmax(0, 1fr); }
+  .section-heading { margin-bottom: 20px; }
+  .section-heading .MuiButton-root { font-size: 12px; }
+  .section-heading .MuiTypography-body2 { font-size: 12px; }
+  .login-card { padding: 28px 24px; }
+  .request-status { right: 10px; top: 58px; max-width: calc(100% - 20px); }
+  .MuiDialog-paper { margin: 16px !important; width: calc(100% - 32px) !important; max-height: calc(100% - 32px) !important; }
+  .MuiDialogTitle-root { padding: 20px 20px 12px !important; }
+  .MuiDialogContent-root { padding: 10px 20px 20px !important; }
+  .MuiDialogActions-root { padding: 12px 20px 20px !important; flex-wrap: wrap; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
+}

@@ -1,0 +1,59 @@
+webauthn-browser original source is licensed GPL-3.0-or-later.
+
+The container assembles separately distributed upstream programs. Their
+respective licenses remain in effect; this project does not relicense them:
+- Chromium: BSD-style and many third-party licenses, chrome://credits.
+- noVNC: MPL-2.0, https://github.com/novnc/noVNC.
+- x11vnc: GPL-2.0-or-later.
+- X.Org/Xvfb: MIT/X11 and component-specific licenses.
+- Openbox: GPL-2.0-or-later.
+- python-xlib: LGPL-2.1-or-later, https://github.com/python-xlib/python-xlib.
+- Debian runtime packages: /usr/share/doc/*/copyright in the image.
+- Rust dependencies: see Cargo.lock and the corresponding crates' license files.
+- Helper structured/nonblocking logs use tracing and tracing-appender (MIT);
+  transitive queue and platform helpers retain their upstream licenses.
+
+This rewrite uses Chromium's WebAuthenticationProxy extension API and a Rust
+software WebAuthn signer.
+The default software path does not require soft-fido2, UHID, host hidraw access,
+new kernel drivers, proprietary Windows Hello, phone-unlock software or hardware
+attestation. The separately enabled helper FIDO adapter uses existing OS HID APIs;
+the container hook is a userspace FIDO-only ABI adapter, not a kernel USB driver.
+
+Frontend dependencies (bundled locally; see web/pnpm-lock.yaml):
+- React / React DOM: MIT, https://github.com/facebook/react.
+- Material UI: MIT, https://github.com/mui/material-ui.
+- Emotion: MIT, https://github.com/emotion-js/emotion.
+- Vite and build/test dependencies retain their upstream licenses.
+
+Vite also generates web/dist/assets/third-party-licenses.txt during the frontend
+build. It is copied into the image and served at /assets/third-party-licenses.txt.
+
+The optional single-executable Bluetooth helper uses btleplug (BSD-3-Clause)
+with platform Bluetooth APIs. Linux statically includes the libdbus client
+library; BlueZ/system D-Bus remain host services. See helper/Cargo.lock,
+helper/THIRD_PARTY_LICENSES.txt and helper/README.md for notices and runtime
+requirements. Container D-Bus/dbus-python/GLib keep their Debian licenses.
+
+Native Desktop dependencies include egui/eframe (MIT OR Apache-2.0) and bundled
+font families with their own MIT/OFL/UFL notices. Terminal-only builds do not
+include the GUI dependency. See helper/THIRD_PARTY_LICENSES.txt for the
+resolved dependency and font notices, including MinGW runtime notices.
+
+Proxy SwitchyOmega 3 (ZeroOmega) 3.5.2 is preinstalled from the official
+zero-peak/ZeroOmega release under GPL-3.0. See vendor/zeroomega/COPYING,
+vendor/zeroomega/AUTHORS and vendor/zeroomega/README.md. The image includes its
+corresponding source archive under /opt/webauthn-browser/licenses/zeroomega.
+Only its verified public manifest key is added to preserve the official ID.
+
+The optional Linux x86_64 userspace hook in native-hid-hook/ and the standalone
+control codec src/fido-relay/src/control.rs are MIT-licensed; see native-hid-hook/LICENSE.
+They are inactive unless explicitly enabled. The rest of the application retains
+its existing GPL-3.0-or-later license.
+
+The optional physical FIDO helper uses official hidapi-rs 2.6.7 (MIT). Its vendored
+HIDAPI C sources offer BSD-3-Clause OR GPL-3.0 OR the original HIDAPI license.
+Linux basic-udev 0.1.2 is MIT OR Apache-2.0; nix 0.30.1 is MIT. Exact upstream
+copyright/license texts and source links are retained in
+helper/THIRD_PARTY_LICENSES.txt. No device permissions or hardware access are
+implied by these license notices.
