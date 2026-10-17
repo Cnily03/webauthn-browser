@@ -64,7 +64,7 @@ jobs:
             if [ '${{ matrix.platform }}' = macos-universal ]; then
               # macOS universal binary
               lipo -create "target/aarch64-apple-darwin/release/$binary" "target/x86_64-apple-darwin/release/$binary" -output "$output"
-              lipo -verify_arch arm64 x86_64 "$output"
+              lipo "$output" -verify_arch arm64 x86_64
             else
               cp "target/${{ matrix.targets }}/release/$binary${{ matrix.ext }}" "$output"
             fi
