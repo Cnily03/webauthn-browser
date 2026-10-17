@@ -4,7 +4,10 @@ use crate::{
     auth::{authorize, csrf},
     authenticator::{cdp::KeyConfig, signer},
     browser::broker,
-    http::error::{fail, ApiResult},
+    http::{
+        error::{fail, ApiResult},
+        IdPath,
+    },
 };
 use argon2::{
     password_hash::{rand_core::OsRng, SaltString},
@@ -77,7 +80,7 @@ pub(crate) async fn pending_requests(State(app): State<App>, h: HeaderMap) -> Ap
 pub(crate) async fn decide_request(
     State(app): State<App>,
     h: HeaderMap,
-    Path(id): Path<String>,
+    Path(IdPath { id }): Path<IdPath>,
     Json(input): Json<Decision>,
 ) -> ApiResult {
     let mut request = {

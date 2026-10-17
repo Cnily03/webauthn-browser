@@ -6,7 +6,10 @@ use crate::{
         attestation,
         cdp::{self, KeyConfig},
     },
-    http::error::{fail, ApiResult},
+    http::{
+        error::{fail, ApiResult},
+        IdPath,
+    },
 };
 use axum::{
     extract::{Path, State},
@@ -205,7 +208,7 @@ pub(crate) async fn create_key(
 pub(crate) async fn edit_key(
     State(app): State<App>,
     h: HeaderMap,
-    Path(id): Path<String>,
+    Path(IdPath { id }): Path<IdPath>,
     Json(input): Json<KeyInput>,
 ) -> ApiResult {
     let _operation = app.operations.lock().await;
@@ -252,7 +255,7 @@ pub(crate) async fn edit_key(
 pub(crate) async fn delete_key(
     State(app): State<App>,
     h: HeaderMap,
-    Path(id): Path<String>,
+    Path(IdPath { id }): Path<IdPath>,
     Json(_): Json<Value>,
 ) -> ApiResult {
     let _operation = app.operations.lock().await;
@@ -276,7 +279,7 @@ pub(crate) async fn delete_key(
 pub(crate) async fn delete_credential(
     State(app): State<App>,
     h: HeaderMap,
-    Path(id): Path<String>,
+    Path(IdPath { id }): Path<IdPath>,
     Json(input): Json<Credential>,
 ) -> ApiResult {
     let _operation = app.operations.lock().await;

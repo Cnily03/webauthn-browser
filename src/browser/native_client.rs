@@ -3,7 +3,10 @@
 use crate::{
     app::{App, Inner},
     auth::{authorize, cookie, csrf, token},
-    http::error::{fail, ApiResult},
+    http::{
+        error::{fail, ApiResult},
+        IdPath,
+    },
 };
 use axum::{
     extract::{Path, State},
@@ -49,7 +52,7 @@ pub struct Start {}
 pub async fn start(
     State(app): State<App>,
     headers: HeaderMap,
-    Path(id): Path<String>,
+    Path(IdPath { id }): Path<IdPath>,
     Json(_input): Json<Start>,
 ) -> ApiResult {
     let mut broker = app.broker.lock().await;
@@ -84,7 +87,7 @@ pub struct BrowserError {
 pub async fn finish(
     State(app): State<App>,
     headers: HeaderMap,
-    Path(id): Path<String>,
+    Path(IdPath { id }): Path<IdPath>,
     Json(input): Json<Finish>,
 ) -> ApiResult {
     let mut broker = app.broker.lock().await;

@@ -592,3 +592,54 @@ context contracts passed. All `tests/extension_*test.cjs` VM suites passed,
 including 92 local-navigation cases and 21 managed-window cases. The existing
 packaged engine fingerprint/host verification and `git diff --check` also passed.
 No Rust or frontend source changed; their build/test suites were not rerun.
+
+## Scoped request identifier regression
+
+Profile forwarding retains the outer `name` and wildcard `path` captures when
+matching the inner API route. The regression uses the actual assembled gateway
+router (`http::router`), profile login and viewer acquisition; directly calling a
+handler or nesting an isolated profile router would miss this failure. Before the
+fix, software key selection returned HTTP 500 with `Expected 1 but got 3`.
+Named-field extraction now selects the inner `id` without depending on capture
+count or order. The same extraction applies to native start/finish and the three
+scoped key administration aliases. Global profile administration routes are not
+forwarded and retain their existing extraction.
+
+```sh
+cargo test --locked scoped_request_paths_complete_software_steps_and_cancel
+cargo fmt --all -- --check
+cargo test --locked --all-targets
+cargo clippy --locked --all-targets -- -D warnings
+cargo build --locked --release
+BINARY="${CARGO_TARGET_DIR:-target}/release/webauthn-browser"
+AUTH_BROWSER_TEST_BINARY="$BINARY" python3 tests/profile_http_smoke.py
+python3 tests/gateway_admission_smoke.py --backend-binary "$BINARY"
+python3 tests/persistence_smoke.py --backend-binary "$BINARY"
+# Requires separately built helper releases and downloads/builds.json:
+python3 tests/helper_downloads_smoke.py --backend-binary "$BINARY"
+```
+
+Validation of this fix: the targeted regression passed for both profiles; the
+full gateway Rust suite passed 319 tests with 13 existing ignored tests and no
+failures. Formatting, Clippy with warnings denied, and the release build passed.
+The profile, gateway-admission and restart-persistence HTTP smokes passed
+serially against that release. The downloads smoke stopped at its prerequisite
+(`Build real helper release artifacts first`); it did not run its download
+assertions. The source-only checkout intentionally has no helper release
+artifacts, and its ZIP retains an empty `downloads/` directory. Ignored optional
+socket/device tests were not counted as passes.
+
+The regression covers default and password-protected named profiles: software
+registration selection, password setup, password verification, touch, stored-key
+login, denial and completed-request replay; native start, canceled finish and
+replay; key edit, credential deletion and key deletion. Missing profile access,
+owner or CSRF, cross-profile authority, and private-ID URLs remain rejected.
+Scoped key mutations still require global settings authority, including when
+the caller owns an authenticated profile engine. No profile routing, name-only
+public identity, middleware or authentication rules changed.
+
+These are in-process router and loopback HTTP checks with synthetic software
+credentials. They do not establish real Chromium/relying-party, physical
+USB/BLE, Docker, or native macOS acceptance. Frontend, extension and helper
+sources are unchanged; their separate suites are not rerun for this Rust-only
+route-extraction fix.

@@ -1295,4 +1295,306 @@ mod tests {
         assert_ne!(fresh_viewer["viewer_id"], viewer["viewer_id"]);
         std::fs::remove_dir_all(dir).unwrap();
     }
+    // Use the production wildcard dispatcher, not a directly nested test router:
+    // the outer name/path captures remain attached when the inner route matches.
+    #[tokio::test]
+    async fn scoped_request_paths_complete_software_steps_and_cancel() {
+        use crate::test_support::{create_pending, create_pending_uv, proxy_fixture};
+        for profile_name in ["default", "remembered"] {
+            let (mut app, dir, csrf, cookies) = fixture().await;
+            app.profiles = Some(Registry::test_ready());
+            let id = if profile_name == "default" {
+                "default".to_owned()
+            } else {
+                let id = create(&app, &csrf, &cookies).await;
+                mode(&app, true, &csrf, &cookies).await;
+                id
+            };
+            let context = ready_context(&app, &id).await;
+            let (_, _, mut output) = proxy_fixture(&context).await;
+            let cookies = if profile_name == "default" {
+                cookies
+            } else {
+                login_cookie(&app, &id, "fixture-password", &csrf, &cookies).await
+            };
+            let mut headers = HeaderMap::new();
+            headers.insert(header::COOKIE, cookies.parse().unwrap());
+            headers.insert("x-csrf-token", csrf.parse().unwrap());
+            let prefix = format!("/p/{profile_name}");
+            let response = public_request(
+                &app,
+                "POST",
+                &format!("{prefix}/api/viewer/acquire"),
+                json!({}),
+                &headers,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let viewer = value(response).await;
+            headers.insert(
+                "x-viewer-token",
+                viewer["viewer_token"].as_str().unwrap().parse().unwrap(),
+            );
+            headers.insert(
+                "x-owner-generation",
+                viewer["generation"].to_string().parse().unwrap(),
+            );
+
+            let request_id = create_pending(&context, 1001).await;
+            let path = format!("{prefix}/api/requests/{request_id}/decision");
+            let mut missing_owner = headers.clone();
+            missing_owner.remove("x-viewer-token");
+            assert_eq!(
+                public_request(
+                    &app,
+                    "POST",
+                    &path,
+                    json!({"action":"deny"}),
+                    &missing_owner
+                )
+                .await
+                .status(),
+                StatusCode::FORBIDDEN
+            );
+            let mut missing_csrf = headers.clone();
+            missing_csrf.remove("x-csrf-token");
+            assert_eq!(
+                public_request(&app, "POST", &path, json!({"action":"deny"}), &missing_csrf)
+                    .await
+                    .status(),
+                StatusCode::FORBIDDEN
+            );
+            if id != "default" {
+                let mut missing_access = headers.clone();
+                missing_access.insert(header::COOKIE, format!("ab_csrf={csrf}").parse().unwrap());
+                assert_eq!(
+                    public_request(
+                        &app,
+                        "POST",
+                        &path,
+                        json!({"action":"deny"}),
+                        &missing_access
+                    )
+                    .await
+                    .status(),
+                    StatusCode::UNAUTHORIZED
+                );
+                assert_eq!(
+                    public_request(
+                        &app,
+                        "POST",
+                        &format!("/p/{id}/api/requests/{request_id}/decision"),
+                        json!({"action":"deny"}),
+                        &headers
+                    )
+                    .await
+                    .status(),
+                    StatusCode::NOT_FOUND
+                );
+                assert_eq!(
+                    public_request(
+                        &app,
+                        "POST",
+                        &format!("/p/default/api/requests/{request_id}/decision"),
+                        json!({"action":"deny"}),
+                        &headers
+                    )
+                    .await
+                    .status(),
+                    StatusCode::FORBIDDEN
+                );
+            }
+
+            for (body, stage) in [
+                (json!({"action":"select","key_id":"usb"}), "setup_password"),
+                (
+                    json!({"action":"setup_password","password":"test-password","password_confirmation":"test-password"}),
+                    "verify_password",
+                ),
+                (
+                    json!({"action":"verify_password","password":"test-password"}),
+                    "touch",
+                ),
+                (json!({"action":"touch"}), "completed"),
+            ] {
+                let response = public_request(&app, "POST", &path, body, &headers).await;
+                let status = response.status();
+                let body = if id == "default" {
+                    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                        .await
+                        .unwrap();
+                    serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+                        Value::String(String::from_utf8_lossy(&bytes).into_owned())
+                    })
+                } else {
+                    public_body(response, &id).await
+                };
+                assert_eq!(status, StatusCode::OK, "{profile_name} {stage}: {body}");
+                assert_eq!(body["stage"], stage);
+            }
+            assert_eq!(output.try_recv().unwrap()["requestId"], 1001);
+            assert_eq!(
+                context.inner.lock().await.store.data.keys[0]
+                    .credentials
+                    .len(),
+                1
+            );
+            assert_eq!(
+                public_request(&app, "POST", &path, json!({"action":"touch"}), &headers)
+                    .await
+                    .status(),
+                StatusCode::CONFLICT
+            );
+
+            // A stored software credential must also complete a login ceremony
+            // through the same public route with explicit verification/presence.
+            let options = json!({"rpId":"example.test","challenge":"Y2hhbGxlbmdl","userVerification":"required","extensions":{"remoteDesktopClientOverride":{"origin":"https://example.test","sameOriginWithAncestors":true}}});
+            let keys = context.inner.lock().await.store.data.keys.clone();
+            let assertion_id = {
+                let mut broker = context.broker.lock().await;
+                broker.on_message(json!({"type":"get","requestId":1004,"requestDetailsJson":options.to_string()}), &keys).unwrap();
+                broker.public_requests()[0]["id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            };
+            let assertion_path = format!("{prefix}/api/requests/{assertion_id}/decision");
+            for (body, stage) in [
+                (
+                    json!({"action":"select","key_id":"usb","credential_id":keys[0].credentials[0]["credentialId"]}),
+                    "verify_password",
+                ),
+                (
+                    json!({"action":"verify_password","password":"test-password"}),
+                    "touch",
+                ),
+                (json!({"action":"touch"}), "completed"),
+            ] {
+                let response = public_request(&app, "POST", &assertion_path, body, &headers).await;
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(value(response).await["stage"], stage);
+            }
+            assert_eq!(output.try_recv().unwrap()["requestId"], 1004);
+
+            let request_id = create_pending_uv(&context, 1002, "discouraged").await;
+            let path = format!("{prefix}/api/requests/{request_id}/decision");
+            for (body, stage) in [
+                (json!({"action":"select","key_id":"usb"}), "touch"),
+                (json!({"action":"deny"}), "denied"),
+            ] {
+                let response = public_request(&app, "POST", &path, body, &headers).await;
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(value(response).await["stage"], stage);
+            }
+            assert!(output.try_recv().unwrap()["error"].is_object());
+            assert!(context.broker.lock().await.public_requests().is_empty());
+            assert_eq!(
+                context.inner.lock().await.store.data.keys[0]
+                    .credentials
+                    .len(),
+                1
+            );
+
+            // Native forwarding has the same inherited captures, but remains a
+            // distinct one-use flow and never invokes the software signer.
+            let native_id = {
+                let mut broker = context.broker.lock().await;
+                broker.on_message(json!({"type":"get","requestId":1003,"requestDetailsJson":options.to_string()}), &[]).unwrap();
+                broker.public_requests()[0]["id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            };
+            let native_path = format!("{prefix}/api/requests/{native_id}/native");
+            let response = public_request(
+                &app,
+                "POST",
+                &format!("{native_path}/start"),
+                json!({}),
+                &headers,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let attempt = value(response).await;
+            let finish = json!({"attempt_id":attempt["attempt_id"],"error":{"name":"NotAllowedError","message":"User canceled"}});
+            assert_eq!(
+                public_request(
+                    &app,
+                    "POST",
+                    &format!("{native_path}/finish"),
+                    finish.clone(),
+                    &headers
+                )
+                .await
+                .status(),
+                StatusCode::OK
+            );
+            assert_eq!(
+                public_request(
+                    &app,
+                    "POST",
+                    &format!("{native_path}/finish"),
+                    finish,
+                    &headers
+                )
+                .await
+                .status(),
+                StatusCode::CONFLICT
+            );
+            assert_eq!(output.try_recv().unwrap()["requestId"], 1003);
+            assert_eq!(
+                context.inner.lock().await.store.data.keys[0]
+                    .credentials
+                    .len(),
+                1
+            );
+
+            // Scoped key routes still require global settings authority, even
+            // when the caller already owns an authenticated profile engine.
+            context.inner.lock().await.store.data.settings_password_hash = Some("protected".into());
+            for (method, suffix, body) in [
+                ("PATCH", "/api/keys/usb", json!({"name":"Edited key"})),
+                (
+                    "DELETE",
+                    "/api/keys/usb/credentials",
+                    json!({"credential_id":"unused"}),
+                ),
+                ("DELETE", "/api/keys/usb", json!({})),
+            ] {
+                assert_eq!(
+                    public_request(&app, method, &format!("{prefix}{suffix}"), body, &headers)
+                        .await
+                        .status(),
+                    StatusCode::UNAUTHORIZED
+                );
+            }
+            context.inner.lock().await.store.data.settings_password_hash = None;
+            let credential_id = context.inner.lock().await.store.data.keys[0].credentials[0]
+                ["credentialId"]
+                .clone();
+            for (method, suffix, body) in [
+                ("PATCH", "/api/keys/usb", json!({"name":"Edited key"})),
+                (
+                    "DELETE",
+                    "/api/keys/usb/credentials",
+                    json!({"credential_id":credential_id}),
+                ),
+                ("DELETE", "/api/keys/usb", json!({})),
+            ] {
+                let response =
+                    public_request(&app, method, &format!("{prefix}{suffix}"), body, &headers)
+                        .await;
+                assert_eq!(response.status(), StatusCode::OK, "{method} {suffix}");
+                let keys = context.inner.lock().await.store.data.keys.clone();
+                if method == "PATCH" {
+                    assert_eq!(keys[0].name, "Edited key");
+                } else if suffix.ends_with("credentials") {
+                    assert!(keys[0].credentials.is_empty());
+                } else {
+                    assert!(keys.iter().all(|key| key.id != "usb"));
+                }
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
 }

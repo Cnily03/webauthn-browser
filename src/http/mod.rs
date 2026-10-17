@@ -18,6 +18,13 @@ use axum::{
 };
 use tower_http::services::ServeDir;
 
+/// Select only the inner route's identifier. Profile dispatch preserves outer
+/// `name` and `path` captures, so positional/scalar extraction is not valid.
+#[derive(serde::Deserialize)]
+pub(crate) struct IdPath {
+    pub(crate) id: String,
+}
+
 pub(crate) fn profile_router(app: App) -> Router {
     profile_router_with_novnc(app, ServeDir::new("/usr/share/novnc"))
 }
