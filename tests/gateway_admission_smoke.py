@@ -117,31 +117,40 @@ def main():
                     client.expect(200, '/healthz', headers=headers)
                     client.expect(200, '/api/logout', method='POST', body={'scope': 'settings'}, headers=headers)
                     for path in ('/ws', '/api/clipboard/ws'):
-                        client.websocket(path, headers)
+                        client.websocket(path, headers, expected=400)
                 client.expect(403, '/api/logout', method='POST', body={'scope': 'settings'}, authenticated=False)
                 client.expect(403, '/api/logout', method='POST', body={'scope': 'settings'}, headers=dict(PROXY, **{'X-CSRF-Token': 'wrong'}))
                 client.expect(415, '/api/logout', method='POST', body=b'{}', headers=dict(PROXY, **{'Content-Type': 'text/plain'}))
                 client.expect(400, '/api/logout', method='POST', body=b'{')
                 for scope in ('vnc', 'settings'):
                     client.expect(200, '/api/security', method='PUT', body={'scope': scope, 'password': f'synthetic-{scope}-password'})
-                for path in ('/api/keys', '/api/requests', '/api/downloads'):
+                for headers in CASES:
+                    client.expect(200, '/api/downloads', headers=headers, authenticated=False)
+                for path in ('/api/keys', '/p/default/api/downloads', '/p/default/api/helper/downloads'):
                     client.expect(401, path)
                 for path in ('/ws', '/api/clipboard/ws'):
-                    client.websocket(path, PROXY, expected=401)
+                    client.websocket(path, PROXY, expected=400)
                 client.expect(401, '/api/login', method='POST', body={'scope': 'settings', 'password': 'incorrect'})
                 client.expect(200, '/api/login', method='POST', body={'scope': 'settings', 'password': 'synthetic-settings-password'})
                 client.expect(200, '/api/keys')
-                client.expect(401, '/api/requests')
-                client.expect(200, '/api/login', method='POST', body={'scope': 'vnc', 'password': 'synthetic-vnc-password'})
-                client.expect(200, '/api/requests')
+                client.expect(400, '/api/requests')
+                client.expect(200, '/p/default/api/login', method='POST', body={'scope': 'vnc', 'password': 'synthetic-vnc-password'})
+                client.expect(200, '/p/default/api/downloads')
+                client.expect(200, '/p/default/api/helper/downloads')
+                client.expect(403, '/p/default/api/requests')
                 for headers in CASES:
                     for path in ('/ws', '/api/clipboard/ws'):
-                        client.websocket(path, headers)
-                        client.websocket(path, headers, authenticated=False, expected=401)
-                client.expect(200, '/api/logout', method='POST', body={'scope': 'vnc'})
-                client.expect(401, '/api/requests')
+                        client.websocket(path, headers, expected=400)
+                        # A valid profile login is insufficient without a one-use viewer ticket.
+                        client.websocket('/p/default' + path, headers, expected=401)
+                        client.websocket('/p/default' + path, headers, authenticated=False, expected=401)
+                client.expect(200, '/p/default/api/logout', method='POST', body={'scope': 'vnc'})
+                client.expect(401, '/p/default/api/downloads')
+                client.expect(401, '/p/default/api/helper/downloads')
+                client.expect(200, '/api/downloads', authenticated=False)
+                client.expect(400, '/api/requests')
                 client.expect(200, '/api/keys')
-                print('PASS: real HTTP/WS LAN/domain/port/reverse-proxy admission without Host config; separate passwords/session revocation, CSRF/JSON, and no added CORS grants')
+                print('PASS: real HTTP LAN/domain/port/reverse-proxy admission; unscoped WS rejection and scoped ticket enforcement; public global downloads, separate passwords, session revocation, CSRF/JSON and no added CORS grants')
             finally:
                 process.terminate()
                 try:

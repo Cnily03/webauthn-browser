@@ -8,6 +8,7 @@ __pycache__
 *.log
 .data
 data
+downloads
 artifacts
 
 history.bundle
@@ -20,6 +21,7 @@ web/*.tsbuildinfo
 web/dist
 
 helper/target
+helper/dist
 
 src/fido-relay/target
 

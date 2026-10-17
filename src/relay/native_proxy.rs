@@ -4,7 +4,7 @@ use futures_util::FutureExt;
 use serde_json::Value;
 use std::{
     io::{Read, Write},
-    os::unix::fs::{FileTypeExt, PermissionsExt},
+    os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
     panic::AssertUnwindSafe,
     path::Path,
     time::Duration,
@@ -127,18 +127,84 @@ fn retry_delay(attempt: u32) -> Duration {
     Duration::from_secs(1u64 << attempt.min(5)).min(Duration::from_secs(30))
 }
 
+/// A bound listener and the filesystem entry owned by this incarnation.
+pub(crate) struct BoundListener {
+    listener: UnixListener,
+    identity: (u64, u64),
+}
+
+fn socket_identity(metadata: &std::fs::Metadata) -> (u64, u64) {
+    (metadata.dev(), metadata.ino())
+}
+
+/// Initial binding runs before startup is acknowledged. The profile lifecycle
+/// serializes initial owners; recovery may only replace its own stale entry.
+pub(crate) async fn bind_listener(path: &Path) -> Result<BoundListener> {
+    bind_listener_owned(path, None).await
+}
+
+async fn bind_listener_owned(path: &Path, previous: Option<(u64, u64)>) -> Result<BoundListener> {
+    let parent = path.parent().context("socket has no parent")?;
+    tokio::fs::create_dir_all(parent).await?;
+    let metadata = tokio::fs::symlink_metadata(parent).await?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        bail!("invalid socket directory");
+    }
+    tokio::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).await?;
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) if metadata.file_type().is_socket() => {
+            if previous.is_some_and(|identity| identity != socket_identity(&metadata)) {
+                bail!("proxy socket belongs to another listener incarnation");
+            }
+            tokio::fs::remove_file(path).await?;
+        }
+        Ok(_) => bail!("refusing to replace non-socket proxy path"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let listener = UnixListener::bind(path)?;
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
+    let identity = socket_identity(&tokio::fs::symlink_metadata(path).await?);
+    Ok(BoundListener { listener, identity })
+}
+
 /// Recover the private listener without taking down the HTTP/settings service.
 /// Retrying is rate-limited; each failed incarnation revokes its broker epoch.
+#[cfg(test)]
 pub async fn listen_with_recovery(
     path: impl AsRef<Path>,
     events: mpsc::UnboundedSender<ProxyEvent>,
 ) {
-    let path = path.as_ref();
+    recover_listener(path.as_ref(), events, None).await;
+}
+
+pub(crate) async fn listen_bound_with_recovery(
+    path: impl AsRef<Path>,
+    events: mpsc::UnboundedSender<ProxyEvent>,
+    listener: BoundListener,
+) {
+    recover_listener(path.as_ref(), events, Some(listener)).await;
+}
+
+async fn recover_listener(
+    path: &Path,
+    events: mpsc::UnboundedSender<ProxyEvent>,
+    mut listener: Option<BoundListener>,
+) {
+    let mut previous = listener.as_ref().map(|bound| bound.identity);
     let mut attempt = 0;
     loop {
         let started = Instant::now();
+        let incarnation = async {
+            let bound = match listener.take() {
+                Some(bound) => bound,
+                None => bind_listener_owned(path, previous).await?,
+            };
+            previous = Some(bound.identity);
+            serve_listener(path, &bound, events.clone()).await
+        };
         let outcome = tokio::select! {
-            result = AssertUnwindSafe(listen(path, events.clone())).catch_unwind() => result,
+            result = AssertUnwindSafe(incarnation).catch_unwind() => result,
             _ = events.closed() => return,
         };
         let message = match outcome {
@@ -146,6 +212,7 @@ pub async fn listen_with_recovery(
             Ok(Err(error)) => format!("Native WebAuthn listener unavailable: {error}"),
             Err(_) => "Native WebAuthn listener crashed".into(),
         };
+        eprintln!("[native-proxy] {message}; recovering automatically");
         if events.send(ProxyEvent::Recovering(message)).is_err() {
             return;
         }
@@ -161,29 +228,47 @@ pub async fn listen_with_recovery(
     }
 }
 
-/// One active bridge. A replacement invalidates all requests from its predecessor.
+#[cfg(test)]
 pub async fn listen(
     path: impl AsRef<Path>,
     events: mpsc::UnboundedSender<ProxyEvent>,
 ) -> Result<()> {
     let path = path.as_ref();
-    let parent = path.parent().context("socket has no parent")?;
-    tokio::fs::create_dir_all(parent).await?;
-    let metadata = tokio::fs::symlink_metadata(parent).await?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        bail!("invalid socket directory");
-    }
-    tokio::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).await?;
-    match tokio::fs::symlink_metadata(path).await {
-        Ok(metadata) if metadata.file_type().is_socket() => {
-            tokio::fs::remove_file(path).await?;
+    let bound = bind_listener(path).await?;
+    serve_listener(path, &bound, events).await
+}
+
+async fn watch_socket_path(path: &Path, identity: (u64, u64)) -> Result<()> {
+    loop {
+        sleep(Duration::from_millis(250)).await;
+        let metadata = tokio::fs::symlink_metadata(path)
+            .await
+            .context("private proxy socket path disappeared")?;
+        if !metadata.file_type().is_socket() || socket_identity(&metadata) != identity {
+            bail!("private proxy socket path was replaced");
         }
-        Ok(_) => bail!("refusing to replace non-socket proxy path"),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
     }
-    let listener = UnixListener::bind(path)?;
-    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
+}
+
+/// One active bridge. A replacement invalidates all requests from its predecessor.
+async fn serve_listener(
+    path: &Path,
+    bound: &BoundListener,
+    events: mpsc::UnboundedSender<ProxyEvent>,
+) -> Result<()> {
+    // A Unix listener can keep accepting on its fd after its pathname is
+    // unlinked. Detect that otherwise permanent ENOENT even with a live peer.
+    tokio::select! {
+        result = accept_connections(&bound.listener, &events) => result,
+        result = watch_socket_path(path, bound.identity) => result,
+        _ = events.closed() => Ok(()),
+    }
+}
+
+async fn accept_connections(
+    listener: &UnixListener,
+    events: &mpsc::UnboundedSender<ProxyEvent>,
+) -> Result<()> {
     let mut next = None;
     loop {
         let stream = match next.take() {
@@ -195,7 +280,7 @@ pub async fn listen(
             .send(ProxyEvent::Connected { outbound })
             .context("broker closed")?;
         let accepted = tokio::select! {
-            result = serve(stream, &events, receiver, CONNECTION_IDLE) => {
+            result = serve(stream, events, receiver, CONNECTION_IDLE) => {
                 if let Err(error) = result { eprintln!("native proxy disconnected: {error}"); }
                 Ok(None)
             },
@@ -204,7 +289,6 @@ pub async fn listen(
         events
             .send(ProxyEvent::Disconnected)
             .context("broker closed")?;
-        // Invalidate old requests even when accept itself fails.
         next = accepted?;
     }
 }
@@ -424,6 +508,23 @@ mod tests {
     async fn blocked_stdout_does_not_starve_input_and_times_out() {
         let (host, broker) = tokio::io::duplex(1024);
         assert_backpressure_is_independent(host, broker).await;
+    }
+
+    #[tokio::test]
+    async fn socket_path_watch_detects_missing_and_replaced_entries() {
+        let directory = std::env::temp_dir().join(format!("proxy-watch-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("proxy.sock");
+        let error = watch_socket_path(&path, (0, 0)).await.unwrap_err();
+        assert!(error.to_string().contains("disappeared"));
+        std::fs::write(&path, "preserve replacement").unwrap();
+        let error = watch_socket_path(&path, (0, 0)).await.unwrap_err();
+        assert!(error.to_string().contains("replaced"));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "preserve replacement"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]
@@ -709,6 +810,87 @@ mod tests {
             .unwrap()
             .unwrap()
             .is_ok());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an execution environment permitting Unix sockets; run with --ignored"]
+    async fn removed_listener_path_recovers_with_and_without_connected_peer() {
+        for connected in [false, true] {
+            let directory =
+                std::env::temp_dir().join(format!("proxy-unlink-{}", uuid::Uuid::new_v4()));
+            let path = directory.join("proxy.sock");
+            let bound = bind_listener(&path).await.unwrap();
+            let (events, mut received) = mpsc::unbounded_channel();
+            let task_path = path.clone();
+            let task =
+                tokio::spawn(
+                    async move { listen_bound_with_recovery(task_path, events, bound).await },
+                );
+            let mut peer = None;
+            let mut outbound = None;
+            if connected {
+                peer = Some(UnixStream::connect(&path).await.unwrap());
+                match received.recv().await.unwrap() {
+                    ProxyEvent::Connected { outbound: sender } => outbound = Some(sender),
+                    _ => panic!("expected connection"),
+                }
+            }
+            std::fs::remove_file(&path).unwrap();
+            let event = timeout(Duration::from_secs(2), received.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(event, ProxyEvent::Recovering(_)));
+            if let Some(outbound) = outbound {
+                assert!(outbound.is_closed());
+            }
+            let replacement = timeout(Duration::from_secs(3), async {
+                loop {
+                    if let Ok(stream) = UnixStream::connect(&path).await {
+                        break stream;
+                    }
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(matches!(
+                received.recv().await.unwrap(),
+                ProxyEvent::Connected { .. }
+            ));
+            drop(received);
+            timeout(Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .unwrap();
+            drop((peer, replacement));
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an execution environment permitting Unix sockets; run with --ignored"]
+    async fn recovery_never_unlinks_a_successor_socket() {
+        let directory =
+            std::env::temp_dir().join(format!("proxy-successor-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("proxy.sock");
+        let old = bind_listener(&path).await.unwrap();
+        std::fs::rename(&path, directory.join("old.sock")).unwrap();
+        let successor = bind_listener(&path).await.unwrap();
+        assert!(watch_socket_path(&path, old.identity).await.is_err());
+        let error = match bind_listener_owned(&path, Some(old.identity)).await {
+            Ok(_) => panic!("recovery replaced successor"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("another listener"));
+        assert_eq!(
+            socket_identity(&std::fs::metadata(&path).unwrap()),
+            successor.identity
+        );
+        let stream = UnixStream::connect(&path).await.unwrap();
+        let accepted = successor.listener.accept().await.unwrap();
+        drop((old, successor, stream, accepted));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]

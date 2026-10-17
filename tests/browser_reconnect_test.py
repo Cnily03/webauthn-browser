@@ -397,8 +397,10 @@ class ReconnectTests(unittest.TestCase):
         runtime.shutdown = Mock()
         runtime.wait_ready.side_effect = supervisor.BrowserUnavailable("Window never appeared")
         response = self.control_request(runtime, b'{"command":"reconnect"}\n')
-        self.assertEqual(response, {"ok": False, "error": "Window never appeared"})
-        runtime.write_status.assert_called_with("failed", "Window never appeared")
+        message = "Browser control [reconnect/operation_failed]: " + supervisor.CONTROL_MESSAGES["operation_failed"]
+        self.assertEqual(response, {"ok": False, "stage": "reconnect", "reason": "operation_failed",
+                                    "error": message})
+        runtime.write_status.assert_called_with("failed", message)
         runtime.shutdown.assert_not_called()
         runtime.restore_browser.assert_not_called()
 

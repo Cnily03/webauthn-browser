@@ -8,14 +8,101 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Data {
+    #[serde(default)]
+    pub multi_profile: bool,
+    #[serde(default = "super::profiles::defaults")]
+    pub profiles: Vec<super::profiles::Profile>,
+    #[serde(default)]
+    pub profile_access_tokens: Vec<super::profiles::AccessToken>,
+    #[serde(default)]
+    pub pending_profile_cleanup: Vec<String>,
+    /// Explicit new deletion requests only; legacy cleanup never implies erasure.
+    #[serde(default)]
+    pub pending_profile_deletion: Vec<String>,
     #[serde(default)]
     pub keys: Vec<KeyConfig>,
     #[serde(default)]
     pub vnc_password_hash: Option<String>,
     #[serde(default)]
     pub settings_password_hash: Option<String>,
+}
+impl Default for Data {
+    fn default() -> Self {
+        Self {
+            keys: Vec::new(),
+            vnc_password_hash: None,
+            settings_password_hash: None,
+            multi_profile: false,
+            profiles: super::profiles::defaults(),
+            profile_access_tokens: Vec::new(),
+            pending_profile_cleanup: Vec::new(),
+            pending_profile_deletion: Vec::new(),
+        }
+    }
+}
+impl Data {
+    pub(crate) fn validate(&self) -> Result<()> {
+        super::profiles::validate(&self.profiles, &self.profile_access_tokens)?;
+        anyhow::ensure!(
+            self.pending_profile_cleanup.len() <= 32
+                && self
+                    .pending_profile_cleanup
+                    .iter()
+                    .all(|id| super::profiles::valid_id(id)),
+            "invalid pending profile cleanup"
+        );
+        anyhow::ensure!(
+            self.pending_profile_cleanup
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                == self.pending_profile_cleanup.len(),
+            "duplicate pending profile cleanup"
+        );
+        anyhow::ensure!(
+            self.pending_profile_deletion.len() <= 32
+                && self.pending_profile_deletion.iter().all(|id| {
+                    id != "default"
+                        && super::profiles::valid_id(id)
+                        && self.profile(id).is_none()
+                        && self.pending_profile_cleanup.contains(id)
+                })
+                && self
+                    .pending_profile_deletion
+                    .iter()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+                    == self.pending_profile_deletion.len(),
+            "invalid pending profile deletion"
+        );
+        for key in &self.keys {
+            key.validate()
+                .context("invalid software authenticator configuration")?;
+        }
+        Ok(())
+    }
+    pub(crate) fn profile(&self, id: &str) -> Option<&super::profiles::Profile> {
+        self.profiles.iter().find(|p| p.id == id)
+    }
+    pub(crate) fn effective_enabled(&self, profile: &super::profiles::Profile) -> bool {
+        if self.multi_profile {
+            profile.enabled
+        } else {
+            profile.id == "default"
+        }
+    }
+    pub(crate) fn profile_password<'a>(
+        &'a self,
+        profile: &'a super::profiles::Profile,
+    ) -> Option<&'a str> {
+        if profile.id == "default" {
+            self.vnc_password_hash.as_deref()
+        } else {
+            profile.password_hash.as_deref()
+        }
+    }
 }
 pub struct Store {
     pub data: Data,
@@ -45,6 +132,9 @@ impl Store {
     pub fn read_persisted(&self) -> Result<Data> {
         Ok(serde_json::from_slice(&fs::read(&self.path)?)?)
     }
+    pub(crate) fn writes_blocked(&self) -> bool {
+        self.write_blocked
+    }
     pub fn block_writes(&mut self) {
         self.write_blocked = true;
     }
@@ -53,10 +143,7 @@ impl Store {
             !self.write_blocked,
             "Persistence outcome is unknown; repair storage and restart before writing"
         );
-        for key in &self.data.keys {
-            key.validate()
-                .context("invalid software authenticator configuration")?;
-        }
+        self.data.validate()?;
         let parent = self.path.parent().context("store must have parent")?;
         fs::create_dir_all(parent)?;
         let temp = parent.join(format!(".webauthn-browser-{}.tmp", uuid::Uuid::new_v4()));

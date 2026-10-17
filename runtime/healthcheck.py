@@ -1,18 +1,15 @@
-"""Container health includes the gateway, attached WebAuthn proxy, and VNC."""
-import socket
+"""Gateway readiness aggregates its currently active profile contexts."""
 import urllib.request
 
 
 def check():
-    # Ignore proxy variables for container-internal readiness checks.
+    # No fixed VNC port: profiles are allocated independently, and an idle
+    # deployment can have no desktop processes while management remains healthy.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     request = urllib.request.Request("http://127.0.0.1:8080/readyz")
     with opener.open(request, timeout=2) as response:
         if response.status != 200:
-            raise RuntimeError("desktop is not ready")
-    with socket.create_connection(("127.0.0.1", 5900), timeout=2) as connection:
-        if not connection.recv(12).startswith(b"RFB "):
-            raise RuntimeError("VNC is not ready")
+            raise RuntimeError("profile runtime is not ready")
 
 
 if __name__ == "__main__":

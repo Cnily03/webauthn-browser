@@ -1,0 +1,652 @@
+{
+  "description": "Synthetic cross-language profile manager contract; no live capability or device.",
+  "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "runtime_epoch": "11111111111111111111111111111111",
+  "cases": [
+    {
+      "name": "initial_ensure",
+      "setup": "absent",
+      "request": {
+        "version": 1,
+        "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "action": "ensure",
+        "profile_id": "default",
+        "revision": 1
+      },
+      "fd_count": 0,
+      "reply": {
+        "ok": true,
+        "version": 1,
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "profile_id": "default",
+        "revision": 1,
+        "runtime_epoch": "11111111111111111111111111111111",
+        "engine_ready": false,
+        "display": ":99",
+        "vnc_port": 5900,
+        "runtime_dir": "/data/run/profiles/default",
+        "control_path": "/data/run/profiles/default/reconnect.sock",
+        "proxy_path": "/data/run/profiles/default/webauthn.sock",
+        "clipboard_path": "/data/run/profiles/default/clipboard.sock",
+        "ble_path": "/data/run/profiles/default/ble.sock",
+        "status_path": "/data/run/profiles/default/runtime.json"
+      }
+    },
+    {
+      "name": "cached_ensure",
+      "setup": "live",
+      "request": {
+        "version": 1,
+        "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "action": "ensure",
+        "profile_id": "default",
+        "revision": 2
+      },
+      "fd_count": 0,
+      "reply": {
+        "ok": true,
+        "version": 1,
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "profile_id": "default",
+        "revision": 2,
+        "runtime_epoch": "11111111111111111111111111111111",
+        "engine_ready": false,
+        "display": ":99",
+        "vnc_port": 5900,
+        "runtime_dir": "/data/run/profiles/default",
+        "control_path": "/data/run/profiles/default/reconnect.sock",
+        "proxy_path": "/data/run/profiles/default/webauthn.sock",
+        "clipboard_path": "/data/run/profiles/default/clipboard.sock",
+        "ble_path": "/data/run/profiles/default/ble.sock",
+        "status_path": "/data/run/profiles/default/runtime.json"
+      }
+    },
+    {
+      "name": "health",
+      "setup": "live",
+      "request": {
+        "version": 1,
+        "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "action": "health",
+        "profile_id": "default",
+        "revision": 1
+      },
+      "fd_count": 0,
+      "reply": {
+        "ok": true,
+        "version": 1,
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "profile_id": "default",
+        "revision": 1,
+        "manager_ready": true,
+        "profiles_alive": true
+      }
+    },
+    {
+      "name": "stop",
+      "setup": "live",
+      "request": {
+        "version": 1,
+        "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "action": "stop",
+        "profile_id": "default",
+        "revision": 2,
+        "runtime_epoch": "11111111111111111111111111111111"
+      },
+      "fd_count": 0,
+      "reply": {
+        "ok": true,
+        "version": 1,
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "profile_id": "default",
+        "revision": 2,
+        "stopped": true
+      }
+    },
+    {
+      "name": "ensure_with_epoch_rejected",
+      "setup": "live",
+      "request": {
+        "version": 1,
+        "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "action": "ensure",
+        "profile_id": "default",
+        "revision": 2,
+        "runtime_epoch": "11111111111111111111111111111111"
+      },
+      "fd_count": 0,
+      "error": "invalid_request"
+    },
+    {
+      "name": "stale_stop_epoch",
+      "setup": "live",
+      "request": {
+        "version": 1,
+        "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "action": "stop",
+        "profile_id": "default",
+        "revision": 2,
+        "runtime_epoch": "22222222222222222222222222222222"
+      },
+      "fd_count": 0,
+      "error": "stale_runtime"
+    },
+    {
+      "name": "dead_cached_ensure",
+      "setup": "dead",
+      "request": {
+        "version": 1,
+        "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "action": "ensure",
+        "profile_id": "default",
+        "revision": 2
+      },
+      "fd_count": 0,
+      "error": "profile_exited"
+    },
+    {
+      "name": "dead_health",
+      "setup": "dead",
+      "request": {
+        "version": 1,
+        "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "action": "health",
+        "profile_id": "default",
+        "revision": 1
+      },
+      "fd_count": 0,
+      "reply": {
+        "ok": true,
+        "version": 1,
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "profile_id": "default",
+        "revision": 1,
+        "manager_ready": true,
+        "profiles_alive": false
+      }
+    },
+    {
+      "name": "uncertain_cleanup_stop",
+      "setup": "dead",
+      "request": {
+        "version": 1,
+        "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "action": "stop",
+        "profile_id": "default",
+        "revision": 2,
+        "runtime_epoch": "11111111111111111111111111111111"
+      },
+      "fd_count": 0,
+      "error": "cleanup_unconfirmed"
+    },
+    {
+      "name": "stale_ensure_epoch_rejected",
+      "setup": "live",
+      "request": {
+        "version": 1,
+        "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "action": "ensure",
+        "profile_id": "default",
+        "revision": 2,
+        "runtime_epoch": "22222222222222222222222222222222"
+      },
+      "fd_count": 0,
+      "error": "invalid_request"
+    },
+    {
+      "name": "dead_ensure_epoch_rejected",
+      "setup": "dead",
+      "request": {
+        "version": 1,
+        "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "action": "ensure",
+        "profile_id": "default",
+        "revision": 2,
+        "runtime_epoch": "11111111111111111111111111111111"
+      },
+      "fd_count": 0,
+      "error": "invalid_request"
+    },
+    {
+      "name": "confirmed_stop_retry",
+      "setup": "stopped",
+      "request": {
+        "version": 1,
+        "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "action": "stop",
+        "profile_id": "default",
+        "revision": 3,
+        "runtime_epoch": "11111111111111111111111111111111"
+      },
+      "fd_count": 0,
+      "reply": {
+        "ok": true,
+        "version": 1,
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "profile_id": "default",
+        "revision": 3,
+        "stopped": true
+      }
+    },
+    {
+      "name": "absent_stop_rejects_unknown_epoch",
+      "setup": "stopped",
+      "request": {
+        "version": 1,
+        "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "action": "stop",
+        "profile_id": "default",
+        "revision": 3,
+        "runtime_epoch": "22222222222222222222222222222222"
+      },
+      "fd_count": 0,
+      "error": "stale_runtime"
+    }
+  ],
+  "stale_cached_reply": {
+    "ok": true,
+    "version": 1,
+    "request_id": "12345678-1234-4234-8234-123456789abc",
+    "profile_id": "default",
+    "revision": 2,
+    "runtime_epoch": "22222222222222222222222222222222",
+    "engine_ready": false,
+    "display": ":99",
+    "vnc_port": 5900,
+    "runtime_dir": "/data/run/profiles/default",
+    "control_path": "/data/run/profiles/default/reconnect.sock",
+    "proxy_path": "/data/run/profiles/default/webauthn.sock",
+    "clipboard_path": "/data/run/profiles/default/clipboard.sock",
+    "ble_path": "/data/run/profiles/default/ble.sock",
+    "status_path": "/data/run/profiles/default/runtime.json"
+  },
+  "timing_seconds": {
+    "worker_reply": 45,
+    "worker_exit": 12,
+    "manager_send": 2,
+    "stop": 60,
+    "ensure": 70,
+    "health": 1,
+    "cleanup": 60,
+    "cleanup_status": 1,
+    "cleanup_startup": 60
+  },
+  "cleanup_cases": [
+    {
+      "name": "cleanup_empty",
+      "setup": "absent",
+      "request": {
+        "version": 1,
+        "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "action": "cleanup",
+        "profile_id": "default",
+        "revision": 5,
+        "cleanup_profiles": []
+      },
+      "reply": {
+        "version": 1,
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "profile_id": "default",
+        "revision": 5,
+        "ok": true,
+        "cleaned": 0,
+        "pending": 0,
+        "skipped": 0,
+        "results": []
+      },
+      "fd_count": 0
+    },
+    {
+      "name": "cleanup_status_unknown",
+      "setup": "absent",
+      "request": {
+        "version": 1,
+        "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "action": "cleanup_status",
+        "profile_id": "default",
+        "revision": 5,
+        "cleanup_profiles": [
+          "default"
+        ]
+      },
+      "reply": {
+        "version": 1,
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "profile_id": "default",
+        "revision": 5,
+        "ok": true,
+        "cleaned": 0,
+        "pending": 1,
+        "skipped": 0,
+        "results": [
+          {
+            "profile_id": "default",
+            "runtime_epoch": null,
+            "stopped": false
+          }
+        ]
+      },
+      "fd_count": 0
+    },
+    {
+      "name": "cleanup_status_stopped",
+      "setup": "stopped",
+      "request": {
+        "version": 1,
+        "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "action": "cleanup_status",
+        "profile_id": "default",
+        "revision": 5,
+        "cleanup_profiles": [
+          "default"
+        ]
+      },
+      "reply": {
+        "version": 1,
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "profile_id": "default",
+        "revision": 5,
+        "ok": true,
+        "cleaned": 1,
+        "pending": 0,
+        "skipped": 0,
+        "results": [
+          {
+            "profile_id": "default",
+            "runtime_epoch": "11111111111111111111111111111111",
+            "stopped": true
+          }
+        ]
+      },
+      "fd_count": 0
+    },
+    {
+      "name": "cleanup_healthy_skipped",
+      "setup": "live",
+      "request": {
+        "version": 1,
+        "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "action": "cleanup",
+        "profile_id": "default",
+        "revision": 5,
+        "cleanup_profiles": []
+      },
+      "reply": {
+        "version": 1,
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "profile_id": "default",
+        "revision": 5,
+        "ok": true,
+        "cleaned": 0,
+        "pending": 0,
+        "skipped": 1,
+        "results": []
+      },
+      "fd_count": 0
+    },
+    {
+      "name": "cleanup_healthy_candidate_pending",
+      "setup": "live",
+      "request": {
+        "version": 1,
+        "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "action": "cleanup",
+        "profile_id": "default",
+        "revision": 5,
+        "cleanup_profiles": [
+          "default"
+        ]
+      },
+      "reply": {
+        "version": 1,
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "profile_id": "default",
+        "revision": 5,
+        "ok": true,
+        "cleaned": 0,
+        "pending": 1,
+        "skipped": 0,
+        "results": [
+          {
+            "profile_id": "default",
+            "runtime_epoch": "11111111111111111111111111111111",
+            "stopped": false
+          }
+        ]
+      },
+      "fd_count": 0
+    },
+    {
+      "name": "cleanup_explicit_stopped",
+      "setup": "live",
+      "request": {
+        "version": 1,
+        "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "action": "cleanup",
+        "profile_id": "default",
+        "revision": 5,
+        "cleanup_profiles": [
+          "default"
+        ],
+        "cleanup_stop_profiles": [
+          {
+            "profile_id": "default",
+            "runtime_epoch": "11111111111111111111111111111111"
+          }
+        ]
+      },
+      "reply": {
+        "version": 1,
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "profile_id": "default",
+        "revision": 5,
+        "ok": true,
+        "cleaned": 1,
+        "pending": 0,
+        "skipped": 0,
+        "results": [
+          {
+            "profile_id": "default",
+            "runtime_epoch": "11111111111111111111111111111111",
+            "stopped": true
+          }
+        ]
+      },
+      "fd_count": 0
+    },
+    {
+      "name": "cleanup_explicit_stale",
+      "setup": "live",
+      "request": {
+        "version": 1,
+        "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "action": "cleanup",
+        "profile_id": "default",
+        "revision": 5,
+        "cleanup_profiles": [
+          "default"
+        ],
+        "cleanup_stop_profiles": [
+          {
+            "profile_id": "default",
+            "runtime_epoch": "22222222222222222222222222222222"
+          }
+        ]
+      },
+      "reply": {
+        "version": 1,
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "profile_id": "default",
+        "revision": 5,
+        "ok": true,
+        "cleaned": 0,
+        "pending": 1,
+        "skipped": 0,
+        "results": [
+          {
+            "profile_id": "default",
+            "runtime_epoch": "11111111111111111111111111111111",
+            "stopped": false
+          }
+        ]
+      },
+      "fd_count": 0
+    },
+    {
+      "name": "cleanup_startup_status_stopped",
+      "setup": "stopped",
+      "request": {
+        "version": 1,
+        "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "action": "cleanup_startup",
+        "profile_id": "default",
+        "revision": 5,
+        "cleanup_profiles": [
+          "default"
+        ]
+      },
+      "reply": {
+        "version": 1,
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "profile_id": "default",
+        "revision": 5,
+        "ok": true,
+        "cleaned": 1,
+        "pending": 0,
+        "skipped": 0,
+        "results": [
+          {
+            "profile_id": "default",
+            "runtime_epoch": "11111111111111111111111111111111",
+            "stopped": true
+          }
+        ]
+      },
+      "fd_count": 0
+    },
+    {
+      "name": "cleanup_startup_healthy_skipped",
+      "setup": "live",
+      "request": {
+        "version": 1,
+        "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "action": "cleanup_startup",
+        "profile_id": "default",
+        "revision": 5,
+        "cleanup_profiles": []
+      },
+      "reply": {
+        "version": 1,
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "profile_id": "default",
+        "revision": 5,
+        "ok": true,
+        "cleaned": 0,
+        "pending": 0,
+        "skipped": 1,
+        "results": []
+      },
+      "fd_count": 0
+    },
+    {
+      "name": "cleanup_startup_explicit_stopped",
+      "setup": "live",
+      "request": {
+        "version": 1,
+        "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "action": "cleanup_startup",
+        "profile_id": "default",
+        "revision": 5,
+        "cleanup_profiles": [
+          "default"
+        ],
+        "cleanup_stop_profiles": [
+          {
+            "profile_id": "default",
+            "runtime_epoch": "11111111111111111111111111111111"
+          }
+        ]
+      },
+      "reply": {
+        "version": 1,
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "profile_id": "default",
+        "revision": 5,
+        "ok": true,
+        "cleaned": 1,
+        "pending": 0,
+        "skipped": 0,
+        "results": [
+          {
+            "profile_id": "default",
+            "runtime_epoch": "11111111111111111111111111111111",
+            "stopped": true
+          }
+        ]
+      },
+      "fd_count": 0
+    },
+    {
+      "name": "cleanup_startup_explicit_stale",
+      "setup": "live",
+      "request": {
+        "version": 1,
+        "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "action": "cleanup_startup",
+        "profile_id": "default",
+        "revision": 5,
+        "cleanup_profiles": [
+          "default"
+        ],
+        "cleanup_stop_profiles": [
+          {
+            "profile_id": "default",
+            "runtime_epoch": "22222222222222222222222222222222"
+          }
+        ]
+      },
+      "reply": {
+        "version": 1,
+        "request_id": "12345678-1234-4234-8234-123456789abc",
+        "profile_id": "default",
+        "revision": 5,
+        "ok": true,
+        "cleaned": 0,
+        "pending": 1,
+        "skipped": 0,
+        "results": [
+          {
+            "profile_id": "default",
+            "runtime_epoch": "11111111111111111111111111111111",
+            "stopped": false
+          }
+        ]
+      },
+      "fd_count": 0
+    }
+  ]
+}

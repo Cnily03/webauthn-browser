@@ -62,8 +62,12 @@ describe('Material UI key form', () => {
     const save = vi.fn();
     renderMaterial(<KeyForm keyData={key} onSave={save} onCancel={vi.fn()} />);
     const summary = screen.getByRole('button', { name: '验证器身份', expanded: false });
-    expect(summary.closest('.MuiAccordion-root')).toHaveClass('MuiPaper-elevation1', 'MuiAccordion-gutters');
-    expect(summary).toHaveClass('MuiAccordionSummary-gutters');
+    const accordion = summary.closest('.MuiAccordion-root')!;
+    expect(accordion).toHaveClass('MuiPaper-elevation0');
+    expect(accordion).not.toHaveClass('MuiAccordion-gutters');
+    expect(summary).not.toHaveClass('MuiAccordionSummary-gutters');
+    expect(accordion.parentElement).toHaveStyle({ gap: 'calc(3 * var(--mui-spacing))' });
+    expect(accordion).toHaveStyle({ marginTop: '0px', marginBottom: '0px', boxShadow: 'none' });
     const region = document.getElementById(summary.getAttribute('aria-controls')!);
     expect(region).toHaveAttribute('aria-labelledby', summary.id);
     expect(region).not.toBeVisible();
@@ -72,6 +76,9 @@ describe('Material UI key form', () => {
     for (let repeat = 0; repeat < 2; repeat++) {
       await userEvent.keyboard('{Enter}');
       expect(region).toBeVisible();
+      expect(accordion).toHaveStyle({ marginTop: '0px', marginBottom: '0px', boxShadow: 'none' });
+      expect(summary).toHaveStyle({ minHeight: '48px' });
+      expect(summary.querySelector('.MuiAccordionSummary-content')).toHaveStyle({ marginTop: '12px', marginBottom: '12px' });
       for (const label of region!.querySelectorAll('dt')) {
         expect(label).toHaveStyle({ display: 'inline', fontWeight: '700' });
         expect(label.textContent).toMatch(/：$/);

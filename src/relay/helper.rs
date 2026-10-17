@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 use tokio::{io::AsyncWriteExt, net::UnixStream};
 
 pub struct Session {
+    profile_authority: Option<crate::profiles::access::Authority>,
     pub id: String,
     pub token: String,
     pub deadline: Instant,
@@ -48,6 +49,7 @@ impl Session {
             deadline = deadline.min(session.expires);
         }
         Self {
+            profile_authority: crate::profiles::access::Authority::capture(headers),
             id: token(),
             token: pairing_token(),
             deadline,
@@ -72,6 +74,9 @@ impl Session {
         })
     }
     pub fn valid_owner(&self, inner: &Inner) -> bool {
+        if let Some(authority) = &self.profile_authority {
+            return self.deadline > Instant::now() && authority.valid(inner);
+        }
         self.deadline > Instant::now()
             && self.epoch == inner.vnc_epoch
             && inner
@@ -103,6 +108,10 @@ impl Session {
     }
     pub(crate) fn owned(&self, inner: &Inner, headers: &HeaderMap) -> bool {
         self.valid_owner(inner)
+            && self
+                .profile_authority
+                .as_ref()
+                .is_none_or(|a| a.same(headers))
             && Some(self.owner_csrf.as_str()) == cookie(headers, "ab_csrf")
             && self.owner_cookie.as_deref() == cookie(headers, "ab_vnc")
     }
@@ -270,8 +279,7 @@ pub async fn advertisement(
     );
     let outcome = tokio::time::timeout(Duration::from_millis(500), async {
         if session.socket.is_none() {
-            let path = std::env::var("AUTH_BROWSER_BLE_SOCKET")
-                .unwrap_or_else(|_| "/data/run/ble.sock".into());
+            let path = &app.endpoints.ble_path;
             session.socket = Some(UnixStream::connect(path).await?);
         }
         session

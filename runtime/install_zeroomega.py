@@ -15,8 +15,10 @@ LIMIT = 32 * 1024 * 1024
 
 
 def verified_bytes(record, cache):
-    path = cache / record['filename']
-    if path.exists():
+    # The image build deliberately supplies no local cache. An explicit cache
+    # remains available for offline installer tests or a separate manual run.
+    path = cache / record['filename'] if cache is not None else None
+    if path is not None and path.exists():
         if path.is_symlink() or not path.is_file():
             raise ValueError('Asset cache must contain ordinary files')
         if path.stat().st_size > LIMIT:
@@ -78,7 +80,7 @@ def install(lock, cache, target, source_target):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--lock', type=Path, required=True)
-    parser.add_argument('--cache', type=Path, required=True)
+    parser.add_argument('--cache', type=Path, help='Optional verified local cache; omitted for image builds')
     parser.add_argument('--target', type=Path, required=True)
     parser.add_argument('--source-target', type=Path, required=True)
     args = parser.parse_args()

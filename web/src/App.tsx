@@ -1,13 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, AppBar, Box, Button, CircularProgress, IconButton, Paper, Snackbar, Stack, TextField, Toolbar, Tooltip, Typography } from '@mui/material';
-import { ApiError, request, setCsrfToken } from './api';
+import { useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { Alert, Box, Button, CircularProgress, Paper, Stack, TextField, Typography } from '@mui/material';
+import { ApiError, browserTransportUrl, request, setCsrfToken } from './api';
+import { profileDestination, retainProfileSelection, profileResourcePath, type PublicBrowserProfile, type ProfileViewer, type NavigateProfile } from './profiles';
 import type { AppStatus } from './types';
 import Settings from './Settings';
 import Downloads from './Downloads';
+import { AppNotificationContext, useAppNotification, type Notify } from './AppNotifications';
 import { useGuardedNavigation, type NavigationGuard } from './useGuardedNavigation';
 import { AuthRequests, type AuthConnection } from './AuthRequests';
-import KeyboardDoubleArrowLeftIcon from '@mui/icons-material/KeyboardDoubleArrowLeft';
-import KeyboardDoubleArrowRightIcon from '@mui/icons-material/KeyboardDoubleArrowRight';
+import { NavigationBar } from './NavigationBar';
 import { BrowserControls } from './BrowserControls';
 import { ClipboardSync } from './ClipboardSync';
 import { installRemoteCursorGuard } from './remoteCursor';
@@ -16,6 +17,7 @@ interface RfbClient {
   scaleViewport: boolean;
   resizeSession: boolean;
   clipViewport: boolean;
+  viewOnly?: boolean;
   disconnect: () => void;
   sendCtrlAltDel?: () => void;
   sendKey: (keysym: number, code?: string, down?: boolean) => void;
@@ -47,7 +49,6 @@ function operationId() {
   const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
-type Notify = (message: string, error?: boolean) => void;
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : '请求失败，请重试。';
 // Bound the existing-window operation, including status revalidation and
 // response bodies. A successful operation then replaces the RFB transport.
@@ -73,36 +74,53 @@ function Login({ scope, onUnlocked, notify }: { scope: 'vnc' | 'settings'; onUnl
   return <Box className="login-page"><Paper variant="outlined" className="login-card"><Stack spacing={3}><Box><Typography variant="overline" color="text.secondary">WebAuthn Browser</Typography><Typography variant="h1">{scope === 'settings' ? '解锁设置' : '解锁浏览器'}</Typography><Typography color="text.secondary" variant="body2" sx={{ mt: 1 }}>{scope === 'settings' ? '输入设置密码以管理安全选项和虚拟验证器。' : '输入浏览器访问密码以连接远程桌面。'}</Typography></Box><Box component="form" onSubmit={submit}><Stack spacing={2.5}><TextField inputRef={setInput} autoFocus label="密码" name="password" type="password" autoComplete="current-password" disabled={busy} />{error && <Alert severity="error">{error}</Alert>}<Button type="submit" variant="contained" disabled={busy} fullWidth>{busy ? '正在解锁…' : '解锁'}</Button></Stack></Box></Stack></Paper></Box>;
 }
 
-function BrowserView({ navigationEpoch, connection, status, refreshStatus, onUnauthorized, notify, onConnection, onAuthConnection, clientRef }: { navigationEpoch: string; connection: Connection; status: AppStatus; refreshStatus: () => Promise<AppStatus>; onUnauthorized: () => void; notify: Notify; onConnection: (connection: Connection) => void; onAuthConnection: (connection: AuthConnection) => void; clientRef: React.MutableRefObject<RfbClient | null> }) {
+// Reuse an in-flight module load across StrictMode mounts and RFB replacements.
+// Failed loads are evicted so an explicit retry can recover after auth/network loss.
+const remoteModules = new Map<string, Promise<any>>();
+function loadRemoteDesktop(path: string) {
+  let pending = remoteModules.get(path);
+  if (!pending) {
+    pending = import(/* @vite-ignore */ path).catch(error => { remoteModules.delete(path); throw error; });
+    remoteModules.set(path, pending);
+  }
+  return pending;
+}
+
+function BrowserView({ navigationEpoch, connection, status, refreshStatus, onUnauthorized, notify, onConnection, onAuthConnection, clientRef, viewOnly = false, profiled = false, onTransportDisconnect }: { viewOnly?: boolean; profiled?: boolean; onTransportDisconnect?: () => void; navigationEpoch: string; connection: Connection; status: AppStatus; refreshStatus: () => Promise<AppStatus>; onUnauthorized: () => void; notify: Notify; onConnection: (connection: Connection) => void; onAuthConnection: (connection: AuthConnection) => void; clientRef: React.MutableRefObject<RfbClient | null> }) {
   const screen = useRef<HTMLDivElement>(null);
   const [clipboardConnected, setClipboardConnected] = useState(false);
+  const readOnly = useRef(viewOnly); readOnly.current = viewOnly;
+  useEffect(() => { if (clientRef.current) clientRef.current.viewOnly = viewOnly; }, [viewOnly, clientRef]);
   useEffect(() => {
     let disposed = false;
     let client: RfbClient | null = null;
+    const transport = new AbortController();
     const cursor = screen.current ? installRemoteCursorGuard(screen.current) : null;
-    const disconnect = () => { if (disposed) return; disposed = true; if (clientRef.current === client) clientRef.current = null; try { client?.disconnect(); } finally { cursor?.dispose(); } };
+    const disconnect = () => { if (disposed) return; disposed = true; transport.abort(); if (clientRef.current === client) clientRef.current = null; try { client?.disconnect(); } finally { cursor?.dispose(); } };
     const current = () => !disposed && clientRef.current === client;
     const connect = async () => {
       onConnection({ state: 'connecting', label: '正在连接浏览器…' });
       try {
         // This runtime URL is served by the same origin. noVNC exclusively owns
         // the child DOM of this ref; the rest of the application is React/MUI.
-        const modulePath = '/novnc/core/rfb.js';
-        const { default: RFB } = await import(/* @vite-ignore */ modulePath);
+        const modulePath = profiled ? profileResourcePath('/novnc/core/rfb.js') : '/novnc/core/rfb.js';
+        const { default: RFB } = await loadRemoteDesktop(modulePath);
         if (disposed || !screen.current) return;
-        const url = new URL('/ws', window.location.href);
-        url.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const url = await browserTransportUrl('/ws', 'vnc', transport.signal);
+        if (disposed || !screen.current) return;
         client = new RFB(screen.current, url.href) as RfbClient;
         clientRef.current = client;
         cursor?.refresh();
         client.scaleViewport = true;
-        client.resizeSession = true;
+        client.resizeSession = !profiled;
+        client.viewOnly = readOnly.current;
         client.clipViewport = false;
         client.addEventListener('connect', () => { if (!current()) return; setClipboardConnected(true); onConnection({ state: 'connected', label: '浏览器已连接' }); });
         client.addEventListener('disconnect', () => {
           if (!current()) return;
           setClipboardConnected(false);
           onConnection({ state: 'disconnected', label: '连接已断开' });
+          onTransportDisconnect?.();
           void refreshStatus().then(latest => { if (current() && !latest.vnc_authenticated) onUnauthorized(); }).catch(() => { /* The reconnect control remains available after a network error. */ });
         });
         client.addEventListener('securityfailure', () => { if (!current()) return; setClipboardConnected(false); onConnection({ state: 'error', label: '连接验证失败' }); notify('远程桌面连接验证失败，请重新连接或检查服务配置。', true); });
@@ -112,19 +130,32 @@ function BrowserView({ navigationEpoch, connection, status, refreshStatus, onUna
     void connect();
     window.addEventListener('pagehide', disconnect);
     return () => { window.removeEventListener('pagehide', disconnect); disconnect(); };
-  }, [clientRef, refreshStatus, onUnauthorized, notify, onConnection]);
-  return <><Box component="section" className="desktop" aria-label="浏览器远程桌面"><Box ref={screen} className="vnc-screen" aria-label="Chromium 远程桌面" />{!clipboardConnected && <Box className="vnc-placeholder" role="status" aria-live="polite"><Typography variant="body2" color="inherit">{connection.label}</Typography></Box>}</Box><Stack spacing={1} className="request-status"><ClipboardSync connected={clipboardConnected} copyAgain={() => { const client = clientRef.current; if (!client) return; client.focus(); client.sendKey(0xffe3, 'ControlLeft', true); try { client.sendKey(0x63, 'KeyC'); } finally { client.sendKey(0xffe3, 'ControlLeft', false); } }} /><AuthRequests navigationEpoch={navigationEpoch} onConnectionChange={onAuthConnection} status={status} refreshStatus={refreshStatus} onUnauthorized={onUnauthorized} notify={notify} /></Stack></>;
+  }, [clientRef, refreshStatus, onUnauthorized, notify, onConnection, profiled, onTransportDisconnect]);
+  return <><Box component="section" className="desktop" aria-label="浏览器远程桌面"><Box ref={screen} className="vnc-screen" aria-label="Chromium 远程桌面" />{!clipboardConnected && <Box className="vnc-placeholder" role="status" aria-live="polite"><Typography variant="body2" color="inherit">{connection.label}</Typography></Box>}</Box><Stack spacing={1} className="request-status"><ClipboardSync connected={clipboardConnected && !viewOnly} copyAgain={() => { const client = clientRef.current; if (!client) return; client.focus(); client.sendKey(0xffe3, 'ControlLeft', true); try { client.sendKey(0x63, 'KeyC'); } finally { client.sendKey(0xffe3, 'ControlLeft', false); } }} />{!viewOnly && <AuthRequests navigationEpoch={navigationEpoch} onConnectionChange={onAuthConnection} status={status} refreshStatus={refreshStatus} onUnauthorized={onUnauthorized} notify={notify} />}</Stack></>;
 }
 
-export default function App() {
+export interface ProfileAccess extends PublicBrowserProfile { viewer: ProfileViewer | null; onDisconnected: () => void; onLocked: (reason?: 'unauthorized' | 'unavailable' | 'logout') => void }
+export default function App({profile, multiProfile = true, navigateDocument = (path: string) => window.location.assign(path), onLocationChange, browserDestination, navigateProfile}: {profile?: ProfileAccess | null; multiProfile?: boolean; navigateDocument?: (path: string) => void; onLocationChange?: (url: string) => void; browserDestination?: string; navigateProfile?: NavigateProfile} = {}) {
+  const canControl = profile === undefined || Boolean(profile?.viewer?.owner && !profile.viewer.expired);
+  const profileLocked = profile?.onLocked;
   const navigationGuard = useRef<NavigationGuard | null>(null);
   const registerNavigationGuard = useCallback((guard: NavigationGuard | null) => { navigationGuard.current = guard; }, []);
   const guardNavigation = useCallback<NavigationGuard>(action => { if (navigationGuard.current) return navigationGuard.current(action); action(); return true; }, []);
   const navigation = useGuardedNavigation(guardNavigation);
+  useEffect(() => { onLocationChange?.(navigation.url); }, [navigation.url, onLocationChange]);
   const path = new URL(navigation.url).pathname.replace(/\/$/, '');
   const isSettings = path === '/settings';
+  const isSettingsRef = useRef(isSettings); isSettingsRef.current = isSettings;
   const isDownloads = path === '/downloads';
   const isBrowser = !isSettings && !isDownloads;
+  const browserHome = isDownloads ? '/' : browserDestination ?? (profile ? profileDestination(profile, multiProfile) : '/');
+  useEffect(() => {
+    if (profile && isBrowser && (multiProfile || profile.name === 'default')) {
+      navigation.replace(profileDestination(profile, multiProfile));
+      retainProfileSelection(profile, multiProfile);
+    }
+  }, [navigation.url, navigation.replace, profile?.name, isBrowser, multiProfile]);
+  useEffect(() => { if (isDownloads) navigation.replace('/downloads'); }, [isDownloads, navigation.url, navigation.replace]);
   const scope = isSettings ? 'settings' : 'vnc';
   const [status, setStatus] = useState<AppStatus | null>(null);
   const statusRef = useRef<AppStatus | null>(null);
@@ -132,7 +163,6 @@ export default function App() {
   const [initializing, setInitializing] = useState(true);
   const [suspended, setSuspended] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
-  const [notice, setNotice] = useState<{ message: string; error: boolean; id: number; open: boolean }>({ message: '', error: false, id: 0, open: false });
   const [connection, setConnection] = useState<Connection>({ state: 'connecting', label: '正在连接浏览器…' });
   const connectionRef = useRef(connection);
   const onConnection = useCallback((next: Connection) => { connectionRef.current = next; setConnection(next); }, []);
@@ -150,14 +180,9 @@ export default function App() {
   const initializationSequence = useRef(0);
   const pageLifecycleSequence = useRef(0);
   const mounted = useRef(true);
-  const notify = useCallback<Notify>((message, error = false) => setNotice(previous => message
-    ? {message, error, id: previous.id + 1, open: true}
-    : {...previous, open: false}), []);
-
-  // Retain the message until its exit animation ends. An old transition must
-  // not erase a newer notice that arrived while the previous one was closing.
-  const closeNotice = (id: number) => setNotice(current => current.id === id ? {...current, open: false} : current);
-  const exitedNotice = (id: number) => setNotice(current => current.id === id && !current.open ? {...current, message: ''} : current);
+  const notification = useAppNotification();
+  const inheritedNotify = useContext(AppNotificationContext);
+  const notify = inheritedNotify ?? notification.notify;
 
   const cancelReconnect = useCallback(() => {
     const operation = reconnectOperation.current;
@@ -171,10 +196,14 @@ export default function App() {
     if (connectionRef.current === operation.progressConnection) onConnection(operation.previousConnection);
     setWorking(null);
   }, [onConnection]);
-  const refreshStatus = useCallback(async (signal?: AbortSignal) => {
+  const refreshStatus = useCallback(async (signal?: AbortSignal, settingsOnly = false) => {
     const generation = sessionGeneration.current;
     const sequence = ++statusRequestSequence.current;
-    const latest = await request<AppStatus>('/api/status', 'GET', undefined, signal ? { signal } : undefined);
+    const response = await request<AppStatus>('/api/status', 'GET', undefined, {...(signal ? {signal} : {}), ...(settingsOnly ? {scope: 'global' as const} : {})});
+    // Global admin authorization must not depend on a disabled/revoked browser
+    // profile, nor replace that profile's browser status with the default's.
+    const latest = settingsOnly && profile && statusRef.current ? {...statusRef.current, csrf_token: response.csrf_token,
+      settings_authenticated: response.settings_authenticated, settings_password_enabled: response.settings_password_enabled} : response;
     if (mounted.current && !signal?.aborted && generation === sessionGeneration.current && sequence === statusRequestSequence.current) {
       const previous = statusRef.current;
       setCsrfToken(latest.csrf_token);
@@ -189,7 +218,8 @@ export default function App() {
     }
     // Never publish a stale authenticated response or restore its CSRF token.
     return statusRef.current || { csrf_token: '', vnc_authenticated: false, settings_authenticated: false, vnc_password_enabled: false, settings_password_enabled: false };
-  }, [cancelReconnect]);
+  }, [cancelReconnect, Boolean(profile)]);
+  const refreshSettingsStatus = useCallback(() => refreshStatus(undefined, true), [refreshStatus]);
   const lockScope = useCallback((lockedScope: 'vnc' | 'settings') => {
     cancelReconnect();
     sessionGeneration.current += 1;
@@ -199,7 +229,7 @@ export default function App() {
     setStatus(locked);
     if (lockedScope === 'vnc') setDesktopVersion(value => value + 1);
   }, [cancelReconnect]);
-  const onVncUnauthorized = useCallback(() => lockScope('vnc'), [lockScope]);
+  const onVncUnauthorized = useCallback(() => { lockScope('vnc'); profileLocked?.('unauthorized'); }, [lockScope, profileLocked]);
   const onSettingsUnauthorized = useCallback(() => lockScope('settings'), [lockScope]);
   const onUnauthorized = isSettings ? onSettingsUnauthorized : onVncUnauthorized;
   const initialize = useCallback(async () => {
@@ -207,7 +237,7 @@ export default function App() {
     const sequence = ++initializationSequence.current;
     setInitializing(true);
     setInitialError('');
-    try { await refreshStatus(); }
+    try { await refreshStatus(undefined, isSettingsRef.current); }
     catch (error) { if (mounted.current && generation === sessionGeneration.current && sequence === initializationSequence.current) setInitialError(errorMessage(error)); }
     // A successful locked snapshot can revoke the auth generation; that must
     // still settle this initialization and reveal Login instead of a spinner.
@@ -221,7 +251,7 @@ export default function App() {
       if (!event.persisted) return;
       const sequence = ++pageLifecycleSequence.current;
       setSuspended(true);
-      void refreshStatus().then(() => { if (!mounted.current || sequence !== pageLifecycleSequence.current) return; setInitialError(''); setDesktopVersion(value => value + 1); setSuspended(false); }).catch(error => { if (!mounted.current || sequence !== pageLifecycleSequence.current) return; setInitialError(errorMessage(error)); setSuspended(false); });
+      void refreshStatus(undefined, isSettingsRef.current).then(() => { if (!mounted.current || sequence !== pageLifecycleSequence.current) return; setInitialError(''); setDesktopVersion(value => value + 1); setSuspended(false); }).catch(error => { if (!mounted.current || sequence !== pageLifecycleSequence.current) return; setInitialError(errorMessage(error)); setSuspended(false); });
     };
     window.addEventListener('pagehide', hide); window.addEventListener('pageshow', show);
     return () => { window.removeEventListener('pagehide', hide); window.removeEventListener('pageshow', show); };
@@ -229,9 +259,18 @@ export default function App() {
   const navigate = (event: React.MouseEvent<HTMLAnchorElement>, destination: '/' | '/settings' | '/downloads') => {
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.currentTarget.target === '_blank') return;
     event.preventDefault();
-    if (new URL(navigation.url).pathname.replace(/\/$/, '') === destination.replace(/\/$/, '')) return;
+    const targetPath = destination === '/' ? browserHome : destination;
+    if (isDownloads && destination === '/' && profile !== undefined) {guardNavigation(() => navigateDocument('/')); return;}
+    if ((profile === null && destination === '/') || (profile && (!profile.viewer || browserDestination) && destination === '/')) { guardNavigation(() => {
+      if (browserDestination === '/') navigateDocument('/');
+      else if (profile && navigateProfile) void navigateProfile(profile).catch(failure => notify(errorMessage(failure), true));
+      else navigateDocument(targetPath);
+    }); return; }
+    const currentUrl = new URL(navigation.url);
+    const targetUrl = new URL(targetPath, currentUrl);
+    if (currentUrl.pathname.replace(/\/$/, '') === targetUrl.pathname.replace(/\/$/, '') && currentUrl.search === targetUrl.search) return;
     const target = event.currentTarget;
-    navigation.navigate(destination, () => target.focus());
+    navigation.navigate(targetPath, () => target.focus());
   };
   const authenticated = Boolean(status?.[`${scope}_authenticated`]);
   const passwordEnabled = Boolean(status?.[`${scope}_password_enabled`]);
@@ -241,13 +280,14 @@ export default function App() {
     workingRef.current = 'logout';
     setWorking('logout');
     sessionGeneration.current += 1;
+    if (scope === 'vnc') profileLocked?.('logout');
     if (statusRef.current) { const locked = { ...statusRef.current, [`${scope}_authenticated`]: false }; statusRef.current = locked; setStatus(locked); }
-    try { await request('/api/logout', 'POST', { scope }); await refreshStatus(); notify('会话已锁定。'); }
+    try { await request('/api/logout', 'POST', { scope }); await (scope === 'settings' ? refreshSettingsStatus() : refreshStatus()); notify('会话已锁定。'); }
     catch (error) { notify(errorMessage(error), true); if (error instanceof ApiError && error.status === 401) onUnauthorized(); }
     finally { workingRef.current = null; if (mounted.current) setWorking(null); }
   };
   const browserAction = useCallback(async (action: BrowserAction) => {
-    if (workingRef.current || !mounted.current || !statusRef.current?.vnc_authenticated) return;
+    if (workingRef.current || !mounted.current || !statusRef.current?.vnc_authenticated || !canControl) return;
     const operation: ReconnectOperation = {
       controller: new AbortController(), previousConnection: connectionRef.current,
       progressConnection: { state: 'connecting', label: action === 'restart' ? '正在重启浏览器…' : '正在准备浏览器窗口…' },
@@ -278,8 +318,15 @@ export default function App() {
           const metadata = await request<BrowserOperationMetadata>('/api/browser/reconnect', 'GET', undefined, { signal });
           if (!current() || signal.aborted) return;
           if (!validOperationMetadata(metadata)) throw new Error('浏览器操作信息无效，请重试。');
+          // Sample at admission, including after a definite-rejection retry. A
+          // new ensure/restart must not reuse a previous desktop's dimensions;
+          // ordinary window resizing never submits a lifecycle operation.
+          const viewport = profile ? {
+            width: Math.min(7680, Math.max(320, Math.floor(window.innerWidth))),
+            height: Math.min(4320, Math.max(240, Math.floor(window.innerHeight))),
+          } : undefined;
           // Preserve the public u64 counter as a string, including above 2^53.
-          const intent = {action, request_id: operation.requestId, operation_scope: metadata.operation_scope, operation_sequence: metadata.operation_sequence};
+          const intent = {action, request_id: operation.requestId, operation_scope: metadata.operation_scope, operation_sequence: metadata.operation_sequence, ...(viewport ? {viewport} : {})};
           try {
             result = await request<BrowserActionResult>('/api/browser/reconnect', 'POST', intent, { signal });
           } catch (error) {
@@ -321,9 +368,10 @@ export default function App() {
         if (mounted.current) setWorking(null);
       }
     }
-  }, [refreshStatus, onVncUnauthorized, onConnection, notify]);
+  }, [refreshStatus, onVncUnauthorized, onConnection, notify, canControl, Boolean(profile)]);
+  useEffect(() => { if (!canControl) cancelReconnect(); }, [canControl, cancelReconnect]);
   useEffect(() => {
-    if (!status?.vnc_authenticated) { ensured.current = false; return; }
+    if (!status?.vnc_authenticated || !canControl) { ensured.current = false; return; }
     if (initializing || suspended || initialError) return;
     let current = true;
 
@@ -335,33 +383,23 @@ export default function App() {
       void browserAction('ensure');
     });
     return () => { current = false; };
-  }, [status?.vnc_authenticated, initializing, suspended, initialError, browserAction]);
+  }, [status?.vnc_authenticated, initializing, suspended, initialError, browserAction, canControl]);
   const fullscreen = async () => {
     try { if (document.fullscreenElement) await document.exitFullscreen(); else if (document.documentElement.requestFullscreen) await document.documentElement.requestFullscreen(); else notify('当前浏览器不支持全屏。', true); }
     catch (error) { notify(errorMessage(error), true); }
   };
   const collapsedHeader = isBrowser && collapsed;
   return <Box className={isSettings ? 'app settings-route' : isDownloads ? 'app downloads-route' : 'app browser-route'}>
-    <AppBar position="fixed" className={`topbar${collapsedHeader ? ' collapsed' : ''}`} sx={{
-      top: {xs: 8, sm: 12}, left: {xs: 8, sm: 16}, right: 'auto', width: 'auto', maxWidth: 'calc(100vw - 16px)',
-      border: 1, borderColor: 'divider', borderRadius: 1, bgcolor: 'background.paper', color: 'text.secondary',
-    }}>
-      <Toolbar variant="dense" disableGutters className="topbar-toolbar" sx={{minHeight: '40px !important', px: .5, gap: .5}}>
-        <Tooltip title={!isBrowser ? '' : collapsedHeader ? '展开导航' : '收起导航'}><IconButton className="navigation-toggle" color="inherit" size="small" disabled={!isBrowser} tabIndex={!isBrowser ? -1 : undefined} aria-hidden={!isBrowser || undefined}
-          aria-label={!isBrowser ? undefined : collapsedHeader ? '展开导航' : '收起导航'} onClick={!isBrowser ? undefined : () => setCollapsed(value => !value)} aria-expanded={!isBrowser ? undefined : !collapsedHeader} aria-controls={!isBrowser ? undefined : 'navigation-group'}
-          sx={{flexShrink: 0, width: 32, height: 32, visibility: !isBrowser ? 'hidden' : 'visible'}}>{collapsedHeader ? <KeyboardDoubleArrowRightIcon fontSize="small" /> : <KeyboardDoubleArrowLeftIcon fontSize="small" />}</IconButton></Tooltip>
-        <Stack id="navigation-group" className="navigation-group" direction="row" hidden={collapsedHeader} sx={{minWidth: 0, alignItems: 'center'}}>
-          <Stack component="nav" direction="row" spacing={.5} aria-label="主导航"><Button component="a" href="/" onClick={event => navigate(event, '/')} color="inherit" className={isBrowser ? 'current-route' : ''} aria-current={isBrowser ? 'page' : undefined}>浏览器</Button><Button component="a" href="/settings" onClick={event => navigate(event, '/settings')} color="inherit" className={isSettings ? 'current-route' : ''} aria-current={isSettings ? 'page' : undefined}>设置</Button><Button component="a" href="/downloads" onClick={event => navigate(event, '/downloads')} color="inherit" className={isDownloads ? 'current-route' : ''} aria-current={isDownloads ? 'page' : undefined}>下载</Button>{authenticated && passwordEnabled && <Button color="inherit" onClick={() => void logout()} disabled={working === 'logout'} className="lock-button">锁定会话</Button>}</Stack>
-        </Stack>
-      </Toolbar>
-    </AppBar>
-    {status?.vnc_authenticated && !suspended && <BrowserControls onModeChange={invalidateLocalNavigation} hidden={!isBrowser || initializing || Boolean(initialError)} authConnection={authConnection} connected={connection.state === 'connected'} reconnecting={working === 'reconnect'} onReconnect={() => void browserAction('restart')} onCtrlAltDelete={() => clientRef.current?.sendCtrlAltDel?.()} onFullscreen={() => void fullscreen()} onUnauthorized={onVncUnauthorized} />}
+    <NavigationBar collapsible={isBrowser} collapsed={collapsedHeader} onToggle={() => setCollapsed(value => !value)}>
+      <Stack component="nav" direction="row" spacing={.5} aria-label="主导航"><Button component="a" href={!isDownloads && profile && !profile.effective_enabled && !browserDestination ? undefined : browserHome} disabled={Boolean(!isDownloads && profile && !profile.effective_enabled && !browserDestination)} onClick={event => navigate(event, '/')} color="inherit" className={isBrowser ? 'current-route' : ''} aria-current={isBrowser ? 'page' : undefined}>浏览器</Button><Button component="a" href="/settings" onClick={event => navigate(event, '/settings')} color="inherit" className={isSettings ? 'current-route' : ''} aria-current={isSettings ? 'page' : undefined}>设置</Button><Button component="a" href="/downloads" onClick={event => navigate(event, '/downloads')} color="inherit" className={isDownloads ? 'current-route' : ''} aria-current={isDownloads ? 'page' : undefined}>下载</Button>{!isDownloads && authenticated && passwordEnabled && <Button color="inherit" onClick={() => void logout()} disabled={working === 'logout'} className="lock-button">锁定会话</Button>}</Stack>
+    </NavigationBar>
+    {status?.vnc_authenticated && !suspended && canControl && <BrowserControls onModeChange={invalidateLocalNavigation} hidden={!isBrowser || initializing || Boolean(initialError)} authConnection={authConnection} connected={connection.state === 'connected'} reconnecting={working === 'reconnect'} onReconnect={() => void browserAction('restart')} onCtrlAltDelete={() => clientRef.current?.sendCtrlAltDel?.()} onFullscreen={() => void fullscreen()} onUnauthorized={onVncUnauthorized} />}
+    {profile?.viewer && status?.vnc_authenticated && !suspended && !initializing && !initialError && working !== 'logout' && <Box hidden={!isBrowser} inert={!isBrowser || undefined} aria-hidden={!isBrowser || undefined} sx={{display: isBrowser ? undefined : 'none'}}>
+      <BrowserView key={`${profile.viewer.viewer_id}:${desktopVersion}`} profiled viewOnly={!canControl} onTransportDisconnect={profile?.onDisconnected} navigationEpoch={`${navigationEpoch}:${navigation.url}`} connection={connection} status={status} refreshStatus={refreshStatus} onUnauthorized={onVncUnauthorized} notify={notify} onConnection={onConnection} onAuthConnection={setAuthConnection} clientRef={clientRef} />
+    </Box>}
     <Box component="main" id="app">
-      {initializing || suspended || working === 'logout' ? <Stack direction="row" className="page-loading" role="status" sx={{ alignItems: "center", justifyContent: "center", gap: 2 }}><CircularProgress size={22} /><Typography variant="body2">{working === 'logout' ? '正在锁定会话…' : '正在连接…'}</Typography></Stack> : initialError || !status ? <Box className="page-error"><Paper variant="outlined"><Typography variant="h2">暂时无法连接服务</Typography><Typography variant="body2" color="text.secondary">{initialError || '请检查服务是否已启动，然后重试。'}</Typography><Button variant="contained" onClick={() => void initialize()}>重试</Button></Paper></Box> : !authenticated ? <Login key={scope} scope={scope} onUnlocked={refreshStatus} notify={notify} /> : isSettings ? <Settings status={status} refreshStatus={refreshStatus} onUnauthorized={onSettingsUnauthorized} notify={notify} registerNavigationGuard={registerNavigationGuard} navigation={navigation} /> : isDownloads ? <Downloads onUnauthorized={onVncUnauthorized} /> : <BrowserView key={desktopVersion} navigationEpoch={`${navigationEpoch}:${navigation.url}`} connection={connection} status={status} refreshStatus={refreshStatus} onUnauthorized={onVncUnauthorized} notify={notify} onConnection={onConnection} onAuthConnection={setAuthConnection} clientRef={clientRef} />}
+      {isDownloads ? <Downloads /> : initializing || suspended || working === 'logout' ? <Stack direction="row" className="page-loading" role="status" sx={{ alignItems: "center", justifyContent: "center", gap: 2 }}><CircularProgress size={22} /><Typography variant="body2">{working === 'logout' ? '正在锁定会话…' : '正在连接…'}</Typography></Stack> : initialError || !status ? <Box className="page-error"><Paper variant="outlined"><Typography variant="h2">暂时无法连接服务</Typography><Typography variant="body2" color="text.secondary">{initialError || '请检查服务是否已启动，然后重试。'}</Typography><Button variant="contained" onClick={() => void initialize()}>重试</Button></Paper></Box> : !authenticated ? <Login key={scope} scope={scope} onUnlocked={scope === 'settings' ? refreshSettingsStatus : refreshStatus} notify={notify} /> : isSettings ? <Settings status={status} refreshStatus={refreshSettingsStatus} onUnauthorized={onSettingsUnauthorized} notify={notify} registerNavigationGuard={registerNavigationGuard} navigation={navigation} /> : profile !== undefined ? null : <BrowserView key={desktopVersion} navigationEpoch={`${navigationEpoch}:${navigation.url}`} connection={connection} status={status} refreshStatus={refreshStatus} onUnauthorized={onVncUnauthorized} notify={notify} onConnection={onConnection} onAuthConnection={setAuthConnection} clientRef={clientRef} />}
     </Box>
-    <Snackbar key={notice.id} open={notice.open} autoHideDuration={notice.error ? null : 3000}
-      onClose={(_, reason) => { if (reason !== 'clickaway') closeNotice(notice.id); }}
-      slotProps={{transition: {onExited: () => exitedNotice(notice.id)}}}
-      anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}><Alert severity={notice.error ? 'error' : 'success'} variant="filled" onClose={() => closeNotice(notice.id)} sx={{ width: '100%' }}>{notice.message}</Alert></Snackbar>
+    {!inheritedNotify && notification.snackbar}
   </Box>;
 }

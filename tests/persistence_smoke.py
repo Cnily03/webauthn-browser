@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import time
 import urllib.request
+import urllib.error
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -46,9 +47,14 @@ def cycle(store, create, binary):
             assert len(keys) == 1 and keys[0]["name"] == "persistent test key"
             assert keys[0]["pin_configured"] is False
             assert keys[0]["simulated_uv"] is False
-            request("/api/login", {"scope":"vnc", "password":"test-vnc-password"})
-            pending = request("/api/requests")
-            assert pending["requests"] == [] and pending["connected"] is False
+            request("/p/default/api/login", {"scope":"vnc", "password":"test-vnc-password"})
+            assert request("/p/default/api/status")["vnc_authenticated"]
+            # Login alone cannot acquire the profile's engine owner authority.
+            try:
+                request("/p/default/api/requests")
+                raise AssertionError("request list admitted without viewer ownership")
+            except urllib.error.HTTPError as error:
+                assert error.code == 403
             backup = request("/api/backup")
             assert len(backup["keys"]) == 1
     finally:

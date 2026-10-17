@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client';
 import createCache from '@emotion/cache';
 import { CacheProvider } from '@emotion/react';
 import { CssBaseline, ThemeProvider } from '@mui/material';
-import App from './App';
+import ProfileApp from './ProfileApp';
 import theme from './theme';
 import './styles.css';
 
@@ -19,7 +19,7 @@ createRoot(root).render(
     <CacheProvider value={cache}>
       <ThemeProvider theme={theme}>
         <CssBaseline />
-        <App />
+        <ProfileApp />
       </ThemeProvider>
     </CacheProvider>
   </StrictMode>,

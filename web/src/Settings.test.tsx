@@ -79,33 +79,28 @@ describe('Material UI settings integration', () => {
     expect(screen.getByRole('switch', { name: '启用验证器' })).toBeChecked();
   });
 
-  it('omits the security information panel while preserving password controls and disable confirmation', async () => {
+  it('separates browser configuration from global security and preserves password confirmation', async () => {
     Object.assign(status, {vnc_password_enabled: true, settings_password_enabled: true});
     const { container } = await mount('security');
     expect(container.querySelector('.security-footnote')).toBeNull();
-    expect(screen.queryByText(/关闭密码时，能访问页面/)).not.toBeInTheDocument();
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     const cards = container.querySelectorAll('.security-card');
-    expect(cards).toHaveLength(2);
-    expect(within(cards[0] as HTMLElement).getByRole('heading', { name: '浏览器访问密码' })).toBeVisible();
-    expect(within(cards[1] as HTMLElement).getByRole('heading', { name: '设置管理密码' })).toBeVisible();
-    for (const card of cards) expect(within(card as HTMLElement).getByRole('button', { name: '更改密码' })).toBeEnabled();
-    const browserCard = within(cards[0] as HTMLElement);
-    await userEvent.click(browserCard.getByRole('button', { name: '停用密码' }));
-    let dialog = await screen.findByRole('dialog', { name: '停用浏览器访问密码？' });
-    expect(dialog).toHaveTextContent('可以访问此服务的人将无需该密码即可进入。此操作只影响对应范围。');
+    expect(cards).toHaveLength(1);
+    const card = within(cards[0] as HTMLElement);
+    expect(card.getByRole('heading', { name: '设置管理密码' })).toBeVisible();
+    expect(screen.queryByText('浏览器访问密码')).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '浏览器设置' })).toHaveAttribute('href', '#browser');
+    await userEvent.click(card.getByRole('button', { name: '停用密码' }));
+    let dialog = await screen.findByRole('dialog', { name: '停用设置管理密码？' });
     expect(calls.filter(call => call.method !== 'GET')).toHaveLength(0);
     await userEvent.click(within(dialog).getByRole('button', { name: '取消' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    expect(calls.filter(call => call.method !== 'GET')).toHaveLength(0);
-    await userEvent.click(browserCard.getByRole('button', { name: '停用密码' }));
-    dialog = await screen.findByRole('dialog', { name: '停用浏览器访问密码？' });
+    await userEvent.click(card.getByRole('button', { name: '停用密码' }));
+    dialog = await screen.findByRole('dialog', { name: '停用设置管理密码？' });
     await userEvent.click(within(dialog).getByRole('button', { name: '停用密码' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    expect(calls.filter(call => call.method !== 'GET')).toEqual([{ path: '/api/security', method: 'PUT', body: {scope: 'vnc', password: null} }]);
+    expect(calls.filter(call => call.method !== 'GET')).toEqual([{ path: '/api/security', method: 'PUT', body: {scope: 'settings', password: null} }]);
     expect(refresh).toHaveBeenCalledOnce();
-    expect(browserCard.getByText('未设置')).toBeVisible();
-    expect(within(cards[1] as HTMLElement).getByText('已启用')).toBeVisible();
+    expect(card.getByText('未设置')).toBeVisible();
   });
 
   it.each(['authenticator', 'keys'])('opens the authenticator section from #%s and emits only the canonical link', async hash => {
@@ -173,16 +168,19 @@ describe('Material UI settings integration', () => {
     assertWeights('.identity-grid');
   });
 
-  it('uses standard Material accordion surfaces, spacing and named regions for admin details', async () => {
+  it('keeps flat Material accordion surfaces and summary geometry stable for admin details', async () => {
     keys[0].credentials = [{ credential_id: 'first-id', rp_id: 'first.example.com', user_name: 'alice' }, { credential_id: 'second-id', rp_id: 'second.example.com', user_name: 'bob' }];
     keys[0].attestation_certificate = { subject: 'CN=Test Certificate', not_before: '', not_after: '2030-01-01', sha256: 'hash', chain_length: 1, currently_valid: true, registration_usable: true };
     await mount();
     const summaries = ['验证器身份', '证明证书', 'RP ID：first.example.com，用户名：alice', 'RP ID：second.example.com，用户名：bob'].map(name => screen.getByRole('button', { name, expanded: false }));
     for (const summary of summaries) {
       const accordion = summary.closest('.MuiAccordion-root')!;
-      expect(accordion).toHaveClass('MuiPaper-elevation1', 'MuiAccordion-gutters');
-      expect(summary).toHaveClass('MuiAccordionSummary-gutters');
+      expect(accordion).toHaveClass('MuiPaper-elevation0');
+      expect(accordion).not.toHaveClass('MuiAccordion-gutters');
+      expect(summary).not.toHaveClass('MuiAccordionSummary-gutters');
+      expect(accordion).toHaveStyle({ marginTop: '0px', marginBottom: '0px', boxShadow: 'none' });
       expect(summary).toHaveStyle({ minHeight: '48px' });
+      expect(summary.querySelector('.MuiAccordionSummary-content')).toHaveStyle({ marginTop: '12px', marginBottom: '12px' });
       const region = document.getElementById(summary.getAttribute('aria-controls')!);
       expect(region).toHaveAttribute('role', 'region');
       expect(region).toHaveAttribute('aria-labelledby', summary.id);
@@ -191,6 +189,14 @@ describe('Material UI settings integration', () => {
       await userEvent.click(summary);
       expect(summary).toHaveAttribute('aria-expanded', 'true');
       expect(region).toBeVisible();
+      expect(accordion).toHaveStyle({ marginTop: '0px', marginBottom: '0px', boxShadow: 'none' });
+      expect(summary).toHaveStyle({ minHeight: '48px' });
+      expect(summary.querySelector('.MuiAccordionSummary-content')).toHaveStyle({ marginTop: '12px', marginBottom: '12px' });
+      const details = region!.querySelector('.MuiAccordionDetails-root');
+      fireEvent.click(summary);
+      expect(region!.querySelector('.MuiAccordionDetails-root')).toBe(details);
+      expect(region!.closest('.MuiCollapse-root')).toHaveStyle({ transitionDuration: '180ms' });
+      fireEvent.click(summary);
     }
     const certificate = screen.getByRole('region', { name: '证明证书' });
     expect(within(certificate).getByText('证书主题：')).toHaveStyle({ fontWeight: '700' });
@@ -350,7 +356,7 @@ describe('Material UI settings integration', () => {
 
   it.each([' 空白🔑密码𠮷 ', ''])('preserves arbitrary access password %j and clears submitted fields', async password => {
     await mount('security');
-    await userEvent.click(screen.getAllByRole('button', { name: '设置密码' })[1]);
+    await userEvent.click(screen.getByRole('button', { name: '设置密码' }));
     const dialog = await screen.findByRole('dialog', { name: '设置设置管理密码' });
     const first = within(dialog).getByLabelText('新密码');
     const second = within(dialog).getByLabelText('再次输入');

@@ -29,13 +29,14 @@ FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        ca-certificates chromium chromium-sandbox fontconfig fonts-dejavu-core \
-       fonts-liberation fonts-noto-cjk novnc openbox python3 python3-xlib python3-dbus python3-gi dbus tini wmctrl x11-utils x11vnc xvfb \
+       fonts-liberation fonts-noto-cjk novnc openbox python3 python3-xlib python3-dbus python3-gi dbus tini wmctrl x11-utils x11-xserver-utils x11vnc xvfb \
     && fc-cache -f -s \
     && fc-list --quiet 'Noto Sans CJK SC:charset=4e2d 6587' \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 authbrowser \
     && useradd --uid 10001 --gid authbrowser --home-dir /data --no-create-home authbrowser \
     && install -d -o authbrowser -g authbrowser -m 0700 /data /data/run \
+    && install -d -o root -g root -m 0755 /downloads \
     && install -d -o authbrowser -g authbrowser -m 0700 /tmp/webauthn-browser-cache \
     && install -d -o root -g root -m 1777 /tmp/.X11-unix \
     && test -u /usr/lib/chromium/chrome-sandbox
@@ -43,13 +44,11 @@ COPY --from=builder /build/target/release/webauthn-browser /usr/local/bin/webaut
 COPY --from=builder /build/native-hid-runtime /opt/webauthn-browser/native
 COPY native-hid-hook/LICENSE /opt/webauthn-browser/licenses/native-hid-hook/LICENSE
 COPY native-hid-hook/licenses /opt/webauthn-browser/licenses/native-hid-hook/dependencies
-COPY downloads /downloads
 COPY runtime /opt/webauthn-browser/runtime
 COPY extension /opt/webauthn-browser/extension
 COPY vendor/zeroomega /opt/webauthn-browser/vendor/zeroomega
 RUN python3 /opt/webauthn-browser/runtime/install_zeroomega.py \
     --lock /opt/webauthn-browser/vendor/zeroomega/release.json \
-    --cache /downloads/zeroomega \
     --target /opt/webauthn-browser/extensions/zeroomega \
     --source-target /opt/webauthn-browser/licenses/zeroomega
 # Fixed system path avoids ambiguity from --user-data-dir and XDG_CONFIG_HOME.

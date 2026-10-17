@@ -1,6 +1,6 @@
 //! Shared application state and process lifecycle; no HTTP/domain handlers.
 use crate::{
-    browser::{broker::Broker, control, window_control},
+    browser::{broker::Broker, window_control},
     http,
     relay::{fido_launcher, native_proxy},
     storage::{restore, store::Store},
@@ -10,6 +10,11 @@ use tokio::sync::{watch, Mutex, Semaphore};
 
 #[derive(Clone)]
 pub(crate) struct App {
+    pub(crate) profile_scope: bool,
+    pub(crate) profile_id: Arc<str>,
+    pub(crate) profile_name: Option<Arc<str>>,
+    pub(crate) endpoints: Arc<crate::profiles::runtime::Endpoints>,
+    pub(crate) profiles: Option<Arc<crate::profiles::Registry>>,
     pub(crate) inner: Arc<Mutex<Inner>>,
     pub(crate) broker: Arc<Mutex<Broker>>,
     pub(crate) revoked: watch::Sender<u64>,
@@ -20,7 +25,21 @@ pub(crate) struct App {
     pub(crate) window_control: Arc<window_control::Controller>,
     pub(crate) fido_launcher: Arc<fido_launcher::Launcher>,
 }
+impl App {
+    pub(crate) async fn cancel_brokers(&self, reason: &str) {
+        self.broker.lock().await.cancel_all(reason);
+        if let Some(registry) = &self.profiles {
+            for app in registry.all() {
+                if !Arc::ptr_eq(&app.broker, &self.broker) {
+                    app.broker.lock().await.cancel_all(reason);
+                }
+            }
+        }
+    }
+}
 pub(crate) struct Inner {
+    pub(crate) profile_viewers: HashMap<String, crate::profiles::viewer::Viewers>,
+    pub(crate) viewer_tickets: HashMap<String, crate::profiles::viewer::Ticket>,
     pub(crate) store: Store,
     pub(crate) sessions: HashMap<String, Session>,
     pub(crate) csrf: HashMap<String, Instant>,
@@ -43,8 +62,15 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         std::env::var("AUTH_BROWSER_STORE").unwrap_or_else(|_| "/data/auth-browser.json".into()),
     )?;
     let (revoked, _) = watch::channel(0);
-    let app = App {
+    let mut app = App {
+        profile_scope: false,
+        profile_name: None,
+        profile_id: std::sync::Arc::from("default"),
+        endpoints: std::sync::Arc::new(crate::profiles::runtime::Endpoints::legacy()),
+        profiles: None,
         inner: Arc::new(Mutex::new(Inner {
+            profile_viewers: std::collections::HashMap::new(),
+            viewer_tickets: std::collections::HashMap::new(),
             store,
             sessions: HashMap::new(),
             csrf: HashMap::new(),
@@ -63,7 +89,21 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         window_control: Arc::new(crate::browser::window_control::Controller::default()),
         fido_launcher: fido_launcher::Launcher::from_environment(),
     };
-    control::start_proxy(app.clone()).await?;
+    app.profiles = Some(crate::profiles::Registry::new());
+    tokio::spawn(crate::profiles::cleanup::recover(app.clone()));
+    let maintenance = app.clone();
+    tokio::spawn(async move {
+        let mut timer = tokio::time::interval(std::time::Duration::from_millis(250));
+        loop {
+            timer.tick().await;
+            if let Some(registry) = &maintenance.profiles {
+                for mut context in registry.all() {
+                    context.profiles = Some(registry.clone());
+                    crate::profiles::viewer::expire(&context).await;
+                }
+            }
+        }
+    });
     let router = http::router(app.clone());
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
     eprintln!("WebAuthn Browser HTTP listening on :8080");
@@ -81,7 +121,15 @@ async fn shutdown(app: App) {
         i.vnc_epoch += 1;
         app.revoked.send_modify(|v| *v += 1);
     }
-    app.broker.lock().await.cancel_all("Service shutting down");
+    {
+        app.inner.lock().await.profile_viewers.clear();
+    }
+    app.cancel_brokers("Service shutting down").await;
+    if let Some(registry) = &app.profiles {
+        for context in registry.all() {
+            context.revoked.send_modify(|n| *n = n.wrapping_add(1));
+        }
+    }
     if let Err(error) = app.inner.lock().await.store.save() {
         eprintln!("CRITICAL: final credential checkpoint failed: {error}");
     }

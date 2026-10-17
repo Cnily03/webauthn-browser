@@ -34,6 +34,30 @@ It tests the corrected configuration and original error. Real Unix-socket
 startup, GetId and name-ownership tests explicitly skip under EPERM; that is not
 a complete desktop pass. See the [dbus-daemon manual](https://dbus.freedesktop.org/doc/dbus-daemon.1.html).
 
+## Browser window control and optional sizing
+
+A window-control error does not by itself prove that VNC cannot resize. Control
+has separate inspection, sizing, restart and maximization phases. Current logs
+and responses use fixed stage/reason codes; arbitrary subprocess or browser data
+is not echoed. The selected profile's `runtime.json` includes
+`updated_at_unix_ms`, so compare the write time with the operation being diagnosed.
+An old failure can remain until another status write.
+
+For the default profile, read the current status without changing the browser:
+
+```sh
+docker compose exec -T webauthn-browser cat /data/run/profiles/default/runtime.json
+docker compose logs --tail 150 webauthn-browser
+```
+
+Other profiles use their immutable ID instead of `default`. A historical
+`Invalid viewport` message describes request validation before RandR runs.
+Inspection now ignores optional geometry, including older gateway requests;
+invalid dimensions and sizing failures no longer block the requested browser
+lifecycle. Cancellation, ownership changes and unconfirmed browser close still
+fail safely. A failed or partially applied resize is not reported as confirmed.
+See [browser lifecycle](browser-lifecycle.md) for restart and saved-tab limits.
+
 ## Docker: `/proc/.../ns/net -> /var/run/docker/netns/...: no such file or directory`
 
 This occurs while Docker creates/joins the network namespace, before the app

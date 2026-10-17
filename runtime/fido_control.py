@@ -230,6 +230,7 @@ class Peer:
     control: socket.socket
     epoch: bytes
     process: object = None
+    started: bool = False
 
 
 @dataclass
@@ -310,6 +311,18 @@ class FidoController:
     def child_started(self, role, process):
         if role in self.peers:
             self.peers[role].process = process
+            self.peers[role].started = True
+        self._hello()
+
+    def channel_started(self, role):
+        """A sibling gateway is owned by the top supervisor, not this process.
+
+        Its private channel EOF is authoritative here; never waitpid a sibling
+        or invent a PID whose reuse could revoke another gateway instance.
+        """
+        if role != "gateway" or role not in self.peers:
+            raise ValueError("Unknown sibling control peer")
+        self.peers[role].started = True
         self._hello()
 
     def _scope_frame(self, op, flags=0):
@@ -320,7 +333,7 @@ class FidoController:
     def _hello(self):
         if self.scope is not None or set(self.peers) != {"gateway", "browser"}:
             return
-        if any(peer.process is None for peer in self.peers.values()):
+        if any(not peer.started for peer in self.peers.values()):
             return
         self.scope = (self.peers["gateway"].epoch, self.peers["browser"].epoch)
         hello = self._scope_frame(Op.HELLO)

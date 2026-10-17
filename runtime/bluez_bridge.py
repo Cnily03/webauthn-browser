@@ -304,7 +304,7 @@ def serve():
     bus = dbus.bus.BusConnection(address)
     name = dbus.service.BusName('org.bluez', bus, do_not_queue=True)
     manager, adapter, store = create_service(bus, dbus)
-    path = Path('/data/run/ble.sock')
+    path = Path(os.environ.get('AUTH_BROWSER_PROFILE_RUNTIME_DIR', '/data/run')) / 'ble.sock'
     if path.is_symlink():
         raise RuntimeError('Refusing symbolic link at BLE socket')
     path.unlink(missing_ok=True)

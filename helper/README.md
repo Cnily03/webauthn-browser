@@ -192,11 +192,12 @@ or invoke its potentially blocking timeout output; queued logs are best-effort.
 ## Platforms and downloads
 
 The catalog has CLI/Desktop names for Linux x86_64, Windows x86_64 (`.exe`), and
-macOS universal. Only real Linux/Windows files are included in this delivery.
-See [build records](../docs/helper-cross-build.md) and
-[artifact provenance and hashes](../downloads/builds.json).
+macOS universal. The default source delivery has an empty downloads directory;
+build or add the required executables separately. See the historical
+[build records](../docs/helper-cross-build.md). When release files are prepared
+locally, their optional `downloads/builds.json` records provenance and hashes.
 
-- **Linux:** supplied files require glibc 2.39+, BlueZ/system D-Bus, an adapter,
+- **Linux:** prior release files require glibc 2.39+, BlueZ/system D-Bus, an adapter,
   and normal Bluetooth permissions. libdbus client code is bundled. Desktop also
   needs X11-compatible display and OpenGL/EGL libraries.
 - **Windows 10/11:** btleplug uses WinRT/system Bluetooth APIs. Files were built

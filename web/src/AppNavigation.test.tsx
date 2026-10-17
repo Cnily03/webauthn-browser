@@ -132,19 +132,28 @@ describe('same-document navigation preserves the owned native session', () => {
     expect(screen.getByRole('combobox', {name: '模式'})).toHaveTextContent('原生中继');
     expect(Socket.instances).toHaveLength(1); expect(socket.close).not.toHaveBeenCalled(); expect(stops()).toHaveLength(0); expect(posts()).toHaveLength(1);
   });
-  it('uses the VNC login boundary for Downloads without locking Settings', async () => {
-    status.vnc_authenticated = false; window.history.replaceState({}, '', '/downloads');
+  it('opens Downloads with both password scopes locked and leaves their protections intact', async () => {
+    status.vnc_authenticated = false; status.settings_authenticated = false;
+    window.history.replaceState({}, '', '/downloads');
     renderMaterial(<StrictMode><App /></StrictMode>); await act(flush);
-    expect(screen.getByRole('heading', {name: '解锁浏览器'})).toBeVisible(); expect(calls.filter(call => call.path === '/api/downloads')).toHaveLength(0);
-    await navigate('设置'); expect(screen.getByRole('heading', {name: '安全设置'})).toBeVisible();
-    await navigate('下载'); expect(screen.getByRole('heading', {name: '解锁浏览器'})).toBeVisible();
-    fireEvent.change(screen.getByLabelText('密码'), {target: {value: 'test-only'}});
-    fireEvent.click(screen.getByRole('button', {name: '解锁'})); await act(flush);
-    expect(window.location.pathname).toBe('/downloads'); expect(screen.getByRole('table', {name: '下载文件'})).toBeVisible();
-    const loginIndex = calls.findIndex(call => call.path === '/api/login');
-    expect(calls.filter(call => call.path === '/api/downloads').length).toBeGreaterThan(0);
-    expect(calls.every((call, index) => call.path !== '/api/downloads' || index > loginIndex)).toBe(true);
-    expect(calls[loginIndex]?.body?.scope).toBe('vnc');
+    expect(screen.getByRole('table', {name: '下载文件'})).toBeVisible();
+    expect(screen.queryByRole('button', {name: '锁定会话'})).toBeNull();
+    expect(screen.queryByLabelText('密码')).toBeNull();
+    await navigate('设置'); expect(screen.getByRole('heading', {name: '解锁设置'})).toBeVisible();
+    await navigate('浏览器'); expect(screen.getByRole('heading', {name: '解锁浏览器'})).toBeVisible();
+    await navigate('下载'); expect(screen.getByRole('table', {name: '下载文件'})).toBeVisible();
+    expect(calls.some(call => call.path === '/api/login' || call.path === '/api/browser/reconnect')).toBe(false);
+  });
+  it.each(['pending', 'failed'])('loads Downloads independently of a %s status request', async state => {
+    window.history.replaceState({}, '', '/downloads');
+    const original = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => String(input) === '/api/status'
+      ? state === 'pending' ? new Promise<Response>(() => {}) : Promise.reject(new Error('status unavailable'))
+      : original(input, init)));
+    renderMaterial(<StrictMode><App /></StrictMode>); await act(flush);
+    expect(screen.getByRole('table', {name: '下载文件'})).toBeVisible();
+    expect(screen.queryByRole('heading', {name: '暂时无法连接服务'})).toBeNull();
+    expect(screen.queryByRole('button', {name: '锁定会话'})).toBeNull();
   });
   it('ignores a late Downloads 401 after leaving without revoking the native owner', async () => {
     const socket = await startNative(); const original = globalThis.fetch;
@@ -160,13 +169,17 @@ describe('same-document navigation preserves the owned native session', () => {
     await navigate('浏览器'); expect(screen.getByRole('combobox', {name: '模式'})).toHaveTextContent('原生中继');
     expect(socket.close).not.toHaveBeenCalled(); expect(stops()).toHaveLength(0); expect(posts()).toHaveLength(1);
   });
-  it.each(['unauthorized list', 'logout'])('revokes the native owner on a Downloads %s while preserving Settings authorization', async reason => {
-    const socket = await startNative(); if (reason === 'unauthorized list') browserLocked = true;
+  it('keeps the native owner after a Downloads 401 and offers no session lock on Downloads', async () => {
+    const socket = await startNative(); const original = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => String(input) === '/api/downloads'
+      ? Promise.resolve(Response.json({error: 'list unavailable'}, {status: 401})) : original(input, init)));
     await navigate('下载');
-    if (reason === 'logout') {fireEvent.click(screen.getByRole('button', {name: '锁定会话'})); await act(flush);}
-    expect(screen.getByRole('heading', {name: '解锁浏览器'})).toBeVisible(); expect(socket.close).toHaveBeenCalledOnce(); expect(stops().length).toBeGreaterThan(0);
-    if (reason === 'logout') expect(calls.find(call => call.path === '/api/logout')?.body).toEqual({scope: 'vnc'});
+    expect(screen.getByRole('alert')).toHaveTextContent('list unavailable');
+    expect(screen.queryByRole('button', {name: '锁定会话'})).toBeNull();
+    expect(socket.close).not.toHaveBeenCalled(); expect(stops()).toHaveLength(0);
     await navigate('设置'); expect(screen.getByRole('heading', {name: '安全设置'})).toBeVisible();
+    await navigate('浏览器'); expect(screen.getByRole('combobox', {name: '模式'})).toHaveTextContent('原生中继');
+    expect(socket.close).not.toHaveBeenCalled(); expect(posts()).toHaveLength(1);
   });
   it('preserves dirty Settings edits when Downloads navigation is cancelled', async () => {
     const socket = await startNative(); await navigate('设置');

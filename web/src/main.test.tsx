@@ -11,7 +11,7 @@ vi.mock('react-dom/client', async importOriginal => {
     return root;
   } };
 });
-vi.mock('./App', async () => {
+vi.mock('./ProfileApp', async () => {
   const { Button, Dialog, DialogTitle } = await import('@mui/material');
   return { default: () => <><Button variant="contained">Nonce test action</Button><Dialog open><DialogTitle>Nonce test dialog</DialogTitle></Dialog></> };
 });

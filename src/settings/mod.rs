@@ -158,10 +158,7 @@ pub(crate) async fn update_engine(
     _keys: Vec<KeyConfig>,
 ) -> Result<(), (StatusCode, String)> {
     // Changes invalidate pending approvals; each new request gets a fresh key snapshot.
-    app.broker
-        .lock()
-        .await
-        .cancel_all("Key configuration changed");
+    app.cancel_brokers("Key configuration changed").await;
     Ok(())
 }
 pub(crate) async fn create_key(
@@ -290,10 +287,7 @@ pub(crate) async fn delete_credential(
             return Err(fail(StatusCode::NOT_FOUND, "Unknown key"));
         }
     }
-    app.broker
-        .lock()
-        .await
-        .cancel_all("Credential configuration changed");
+    app.cancel_brokers("Credential configuration changed").await;
     let mut i = app.inner.lock().await;
     let old = i.store.data.clone();
     if let Some(k) = i.store.data.keys.iter_mut().find(|k| k.id == id) {

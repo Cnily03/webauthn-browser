@@ -87,6 +87,29 @@ creating another data set. This documentation does not rename the host directory
 References: [docker cp](https://docs.docker.com/reference/cli/docker/container/cp/)
 and [bind mounts hide existing contents](https://docs.docker.com/engine/storage/bind-mounts/#bind-mounting-over-existing-data).
 
+## Profile-mode compatibility
+
+An existing deployment opens as the `default` profile with multi-profile mode
+disabled. Its existing browser and configuration directories remain in place;
+enabling multi-profile mode does not move or copy them. The existing desktop
+password remains the default profile's access password. New profiles receive
+independent immutable identities and browser directories.
+
+Legacy password hashes are preserved, including an old empty-string password.
+New protected-profile forms require a nonempty password. If the legacy default
+password was empty, clear or replace it through global Settings → Browser
+Settings before logging into that profile. Migration does not silently turn a
+protected profile into passwordless access.
+
+Profile configuration and remembered-access hashes share the global settings
+store; authenticator exports do not contain every browser's cookies, history or
+extensions. Preserve the entire stopped `/data` tree for a complete backup.
+Explicitly deleting a non-default profile through Settings permanently removes
+its complete `/data/profiles/{immutable_id}` directory after access is revoked and
+its owned runtime is confirmed stopped. New deletion requests are journaled for
+recovery; historical retained orphan directories are not purged. Disable and local
+forget continue to preserve browser files. See [profiles](profiles.md).
+
 ## Software-authenticator compatibility
 
 The service continues reading the same `auth-browser.json` and Chromium profile.
@@ -96,7 +119,7 @@ fail explicitly without discarding the stored data. Legacy automatic-presence
 and simulated-UV fields remain readable for compatibility but grant no approval.
 
 When a request first needs UV for an existing key, the outer page asks you to set
-that key's local password. It is separate from the VNC and Settings passwords and
+that key's local password. It is separate from profile-access and Settings passwords and
 is not a hardware PIN. Existing website credentials are not re-registered by this
 step. Exported backups contain private keys and key-password hashes; keep them
 private. A full offline data-directory backup remains recommended before upgrading.

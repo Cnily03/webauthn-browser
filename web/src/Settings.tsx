@@ -13,6 +13,7 @@ import { ApiError, request } from './api';
 import type { AppStatus, Credential, VirtualKey } from './types';
 import KeyForm, { attestationLabel, attestationRequestLabel, KeyIdentity, type KeyFields } from './KeyForm';
 import { BackupDialogs } from './BackupDialogs';
+import ProfileSettings from './ProfileSettings';
 import { useGuardedNavigation, type NavigationGuard } from './useGuardedNavigation';
 
 type Notify = (message: string, error?: boolean) => void;
@@ -158,7 +159,8 @@ function KeyDetails({ keyData, busy, onEdit, onToggle, onDelete, onDeleteCredent
 
 // Keep existing bookmarks working; all navigation emits the canonical anchor.
 function readSettingsSection(url: string) {
-  return ['#authenticator', '#keys'].includes(new URL(url).hash) ? 'authenticator' : 'security';
+  const hash = new URL(url).hash;
+  return ['#authenticator', '#keys'].includes(hash) ? 'authenticator' : hash === '#browser' ? 'browser' : 'security';
 }
 
 export default function Settings({ status, refreshStatus, onUnauthorized, notify, registerNavigationGuard, navigation }: SettingsProps) {
@@ -266,13 +268,14 @@ export default function Settings({ status, refreshStatus, onUnauthorized, notify
   return <Box className="settings-page">
     <Box component="header" className="settings-heading"><Typography variant="overline" color="text.secondary">浏览器与验证器</Typography><Typography variant="h1">设置</Typography></Box>
     <Box className="settings-layout" sx={{ display: { xs: 'block', md: 'grid' }, gridTemplateColumns: '176px minmax(0, 1fr)', alignItems: 'start', gap: 3 }}>
-      <Paper component="nav" className="section-nav" variant="outlined" aria-label="设置分类"><List disablePadding>{[['security', '安全设置'], ['authenticator', '验证器管理']].map(([id, label]) => <ListItemButton key={id} component="a" href={`#${id}`} selected={section === id} aria-current={section === id ? 'page' : undefined} onClick={event => { event.preventDefault(); acceptedNavigation.navigate(`#${id}`); }}><ListItemText primary={label} /></ListItemButton>)}</List></Paper>
+      <Paper component="nav" className="section-nav" variant="outlined" aria-label="设置分类"><List disablePadding>{[['security', '安全设置'], ['browser', '浏览器设置'], ['authenticator', '验证器管理']].map(([id, label]) => <ListItemButton key={id} component="a" href={`#${id}`} selected={section === id} aria-current={section === id ? 'page' : undefined} onClick={event => { event.preventDefault(); acceptedNavigation.navigate(`#${id}`); }}><ListItemText primary={label} /></ListItemButton>)}</List></Paper>
       <Box className="settings-sections">
         {loading ? <Stack className="settings-loading" role="status" direction="row" spacing={2} sx={{ alignItems: "center" }}><CircularProgress size={22} /><Typography>正在读取设置…</Typography></Stack> : loadError ? <Alert severity="error" action={<Button onClick={() => { setLoading(true); loadData().catch(failure).finally(() => setLoading(false)); }}>重试</Button>}>{loadError}</Alert> : <>
           {section === 'security' && <Box component="section" id="security" aria-labelledby="security-title">
-            <Box className="section-heading"><Typography id="security-title" variant="h2">安全设置</Typography><Typography variant="body2" color="text.secondary">分别保护浏览器和设置页。两种密码独立，按需开启。</Typography></Box>
-            <Box className="security-grid" sx={{ display: 'grid', gridTemplateColumns: { xs: 'minmax(0, 1fr)', sm: 'repeat(2, minmax(0, 1fr))', md: 'minmax(0, 1fr)', lg: 'repeat(2, minmax(0, 1fr))' }, gap: 2 }}><SecurityCard scope="vnc" title="浏览器访问密码" description="控制远程桌面与浏览器连接。" enabled={Boolean(security.vnc_password_enabled)} busy={busy} onSave={value => savePassword('vnc', value)} onDisable={() => disablePassword('vnc', '浏览器访问密码')} /><SecurityCard scope="settings" title="设置管理密码" description="控制安全设置、验证器与通行密钥管理。" enabled={Boolean(security.settings_password_enabled)} busy={busy} onSave={value => savePassword('settings', value)} onDisable={() => disablePassword('settings', '设置管理密码')} /></Box>
+            <Box className="section-heading"><Typography id="security-title" variant="h2">安全设置</Typography></Box>
+            <Box className="security-grid"><SecurityCard scope="settings" title="设置管理密码" description="控制安全设置、验证器与通行密钥管理。" enabled={Boolean(security.settings_password_enabled)} busy={busy} onSave={value => savePassword('settings', value)} onDisable={() => disablePassword('settings', '设置管理密码')} /></Box>
           </Box>}
+          {section === 'browser' && <ProfileSettings notify={notify} onUnauthorized={onUnauthorized} onChanged={() => { void refreshStatus().catch(failure); }} />}
           {section === 'authenticator' && <Box component="section" id="authenticator" aria-labelledby="authenticator-title">
             <Stack direction="row" className="section-heading" sx={{ alignItems: "flex-start", justifyContent: "space-between", gap: 2 }}><Box><Stack direction="row" sx={{ alignItems: "center", gap: 1 }}><Typography id="authenticator-title" variant="h2">验证器管理</Typography><Chip label={`${keys.length} 个`} /></Stack><Typography variant="body2" color="text.secondary" sx={{ mt: .7 }}>选择验证器查看通行密钥，或编辑日常设置。</Typography></Box><Button ref={addButton} variant="contained" onClick={() => { if (editor === 'create') { document.querySelector<HTMLInputElement>('[name="key-name"]')?.focus(); return; } guarded(() => { setEditor('create'); dirtyRef.current = false; }); }} startIcon={<AddIcon />} aria-controls="key-detail" aria-expanded={editor === 'create'} disabled={busy}>添加验证器</Button></Stack>
             <Box className={`keys-workspace${keys.length ? '' : ' is-empty'}`} sx={{ display: 'grid', gridTemplateColumns: { xs: 'minmax(0, 1fr)', sm: keys.length ? '176px minmax(0, 1fr)' : 'minmax(0, 1fr)', lg: keys.length ? '208px minmax(0, 1fr)' : 'minmax(0, 1fr)' }, alignItems: 'start', gap: 2 }}>

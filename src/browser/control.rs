@@ -30,12 +30,32 @@ fn read_runtime(path: &std::path::Path) -> Value {
 }
 pub(crate) async fn runtime(State(app): State<App>, headers: HeaderMap) -> ApiResult {
     authorize(&*app.inner.lock().await, &headers, "settings")?;
-    Ok(Json(read_runtime(std::path::Path::new(
-        "/data/run/runtime.json",
-    ))))
+    Ok(Json(read_runtime(&app.endpoints.status_path)))
 }
 pub(crate) async fn ready(State(app): State<App>) -> Response {
-    let desktop = read_runtime(std::path::Path::new("/data/run/runtime.json"));
+    if let Some(registry) = &app.profiles {
+        if !registry.manager.health().await {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "profile manager unavailable",
+            )
+                .into_response();
+        }
+        for context in registry.all() {
+            if context.endpoints.runtime_epoch.is_some() {
+                let broker = context.broker.lock().await;
+                if !broker.ready && !(broker.native_qr_mode && broker.outbound.is_some()) {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "profile engine unavailable",
+                    )
+                        .into_response();
+                }
+            }
+        }
+        return (StatusCode::OK, "ready").into_response();
+    }
+    let desktop = read_runtime(&app.endpoints.status_path);
     let mut broker = app.broker.lock().await;
     broker.expire();
     if desktop["state"] == "ready"
@@ -74,12 +94,15 @@ pub(crate) async fn start_proxy(app: App) -> anyhow::Result<()> {
         native_proxy::BRIDGE_BUILD
     );
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let socket = std::env::var("AUTH_BROWSER_PROXY_SOCKET")
-        .unwrap_or_else(|_| "/data/run/webauthn.sock".into());
-    tokio::spawn(async move {
-        native_proxy::listen_with_recovery(socket, tx).await;
+    let socket = app.endpoints.proxy_path.clone();
+    // Do not publish proxy startup before bind/permissions have succeeded.
+    let bound = native_proxy::bind_listener(&socket).await?;
+    let registry = app.profiles.clone();
+    let id = app.profile_id.clone();
+    let listener = tokio::spawn(async move {
+        native_proxy::listen_bound_with_recovery(socket, tx, bound).await;
     });
-    tokio::spawn(async move {
+    let events = tokio::spawn(async move {
         let mut timer = tokio::time::interval(Duration::from_millis(250));
         loop {
             tokio::select! {
@@ -116,6 +139,9 @@ pub(crate) async fn start_proxy(app: App) -> anyhow::Result<()> {
             }
         }
     });
+    if let Some(registry) = registry {
+        registry.jobs(&id, vec![listener, events]);
+    }
     Ok(())
 }
 
@@ -127,6 +153,24 @@ mod tests {
     use axum::http::StatusCode;
 
     use serde_json::{json, Value};
+
+    #[tokio::test]
+    async fn proxy_startup_reports_bind_failure_before_success() {
+        let (mut app, dir) = app();
+        let path = std::env::temp_dir().join(format!("proxy-startup-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&path).unwrap();
+        let socket = path.join("proxy.sock");
+        std::fs::write(&socket, "preserve existing file").unwrap();
+        std::sync::Arc::make_mut(&mut app.endpoints).proxy_path = socket.clone();
+        let error = start_proxy(app).await.unwrap_err();
+        assert!(error.to_string().contains("non-socket"));
+        assert_eq!(
+            std::fs::read_to_string(socket).unwrap(),
+            "preserve existing file"
+        );
+        std::fs::remove_dir_all(path).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn runtime_status_handles_missing_corrupt_and_failed_state() {

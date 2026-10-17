@@ -41,8 +41,9 @@ class ProjectDocumentationTests(unittest.TestCase):
 
     def test_human_titles_do_not_rename_technical_artifact_paths(self):
         workflow = (ROOT / ".github/workflows/helper.yml").read_text()
-        self.assertTrue(workflow.startswith("name: Build WebAuthn Helper and Desktop\n"))
-        self.assertIn("name: webauthn-helper-${{ matrix.platform }}", workflow)
+        self.assertTrue(workflow.startswith("name: Helper\n"))
+        self.assertIn("name: ${{ steps.package.outputs.package_name }}-${{ matrix.platform }}", workflow)
+        self.assertIn("tomllib.load(open('Cargo.toml', 'rb'))['package']['name']", workflow)
         self.assertTrue((ROOT / "README.md").read_text().startswith("# WebAuthn Browser\n"))
 
     def test_readme_ends_with_requested_license(self):

@@ -42,7 +42,7 @@ pub(crate) async fn request_events(
     let i = app.inner.lock().await;
     authorize(&i, &h, "vnc")?;
     csrf(&i, &h)?;
-    let epoch = i.vnc_epoch;
+    let epoch = crate::auth::vnc_epoch(&i, &h);
     drop(i);
     let cursor = h
         .get("last-event-id")
@@ -59,7 +59,7 @@ pub(crate) async fn request_events(
     let (mut changes, navigation, subscribed_at_ms) = {
         let broker = app.broker.lock().await;
         let inner = app.inner.lock().await;
-        if inner.vnc_epoch != epoch {
+        if crate::auth::vnc_epoch(&inner, &h) != epoch {
             return Err(fail(StatusCode::UNAUTHORIZED, "Browser session changed"));
         }
         authorize(&inner, &h, "vnc")?;
@@ -85,7 +85,7 @@ pub(crate) async fn request_events(
         loop {
             {
                 let i = lease_app.inner.lock().await;
-                if i.vnc_epoch != epoch
+                if crate::auth::vnc_epoch(&i, &lease_headers) != epoch
                     || !authenticated(&i, &lease_headers, "vnc")
                     || csrf(&i, &lease_headers).is_err()
                 {
@@ -151,7 +151,7 @@ pub(crate) async fn request_events(
             // cannot be revoked between this check and frame serialization.
             let mut broker = state.app.broker.lock().await;
             let i = state.app.inner.lock().await;
-            if i.vnc_epoch != state.epoch
+            if crate::auth::vnc_epoch(&i, &state.headers) != state.epoch
                 || !authenticated(&i, &state.headers, "vnc")
                 || csrf(&i, &state.headers).is_err()
             {
@@ -273,7 +273,14 @@ mod tests {
                 .unwrap();
             Self {
                 app: App {
+                    profile_scope: false,
+                    profile_name: None,
+                    profile_id: std::sync::Arc::from("default"),
+                    endpoints: std::sync::Arc::new(crate::profiles::runtime::Endpoints::legacy()),
+                    profiles: None,
                     inner: Arc::new(Mutex::new(Inner {
+                        profile_viewers: std::collections::HashMap::new(),
+                        viewer_tickets: std::collections::HashMap::new(),
                         store,
                         sessions,
                         csrf: HashMap::from([(CSRF_TOKEN.into(), expires)]),

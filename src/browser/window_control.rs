@@ -52,10 +52,28 @@ pub(crate) enum Action {
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Input {
+    #[serde(default, deserialize_with = "optional_viewport")]
+    viewport: Option<Viewport>,
     action: Action,
     request_id: String,
     operation_scope: String,
     operation_sequence: String,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct Viewport {
+    width: u32,
+    height: u32,
+}
+// Geometry is optional advice. Keep the operation identity/action schema strict,
+// while treating malformed or out-of-policy geometry as a no-resize request.
+fn optional_viewport<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Viewport>, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value::<Viewport>(value)
+        .ok()
+        .filter(|v| (320..=7680).contains(&v.width) && (240..=4320).contains(&v.height)))
 }
 impl Input {
     fn validate(&self) -> Result<u64, Failure> {
@@ -87,13 +105,28 @@ impl Input {
 pub(super) struct Failure {
     status: StatusCode,
     message: &'static str,
+    diagnostic: Option<(&'static str, &'static str)>,
 }
 impl Failure {
     const fn new(status: StatusCode, message: &'static str) -> Self {
-        Self { status, message }
+        Self {
+            status,
+            message,
+            diagnostic: None,
+        }
+    }
+    fn at(mut self, stage: &'static str, reason: &'static str) -> Self {
+        if self.diagnostic.is_none() {
+            self.diagnostic = Some((stage, reason));
+        }
+        self
     }
     fn response(self) -> (StatusCode, String) {
-        (self.status, self.message.into())
+        let message = match self.diagnostic {
+            Some((stage, reason)) => format!("{} [{stage}/{reason}]", self.message),
+            None => self.message.into(),
+        };
+        (self.status, message)
     }
 }
 #[derive(Clone, Copy, Debug)]
@@ -105,6 +138,7 @@ type Terminal = Result<Outcome, Failure>;
 
 #[derive(Clone, PartialEq, Eq)]
 struct Owner {
+    profile_authority: Option<crate::profiles::access::Authority>,
     csrf: String,
     session: Option<String>,
     epoch: u64,
@@ -115,12 +149,16 @@ impl Owner {
         csrf(inner, headers)
             .map_err(|_| Failure::new(StatusCode::FORBIDDEN, "CSRF token required"))?;
         Ok(Self {
+            profile_authority: crate::profiles::access::Authority::capture(headers),
             csrf: cookie(headers, "ab_csrf").ok_or(REVOKED)?.into(),
             session: cookie(headers, "ab_vnc").map(str::to_owned),
             epoch: inner.vnc_epoch,
         })
     }
     fn valid(&self, inner: &Inner) -> bool {
+        if let Some(authority) = &self.profile_authority {
+            return authority.valid(inner);
+        }
         let now = Instant::now();
         self.epoch == inner.vnc_epoch
             && inner
@@ -144,6 +182,7 @@ async fn check_owner(app: &App, owner: &Owner) -> Result<(), Failure> {
 }
 
 struct Entry {
+    viewport: Option<Viewport>,
     owner: Owner,
     action: Action,
     sequence: u64,
@@ -261,7 +300,11 @@ pub(crate) async fn handle(
         }
     }
     let (mut terminal, started) = if let Some(entry) = entries.receipts.get(&request_key) {
-        if entry.owner != owner || entry.action != input.action || entry.sequence != sequence {
+        if entry.owner != owner
+            || entry.action != input.action
+            || entry.sequence != sequence
+            || entry.viewport != input.viewport
+        {
             return Err(Failure::new(
                 StatusCode::CONFLICT,
                 "request_id belongs to a different browser operation",
@@ -287,6 +330,7 @@ pub(crate) async fn handle(
         entries.receipts.insert(
             request_key,
             Entry {
+                viewport: input.viewport,
                 owner: owner.clone(),
                 action: input.action,
                 sequence,
@@ -344,6 +388,17 @@ pub(crate) async fn handle(
     }
     check_owner(&app, &owner).await.map_err(Failure::response)?;
     let result = *terminal.borrow();
+    if app.profiles.is_some()
+        && matches!(
+            result,
+            Some(Ok(Outcome {
+                restarted: true,
+                ..
+            }))
+        )
+    {
+        crate::profiles::viewer::permit_handoff(&mut *app.inner.lock().await, &headers);
+    }
     match result {
         Some(Ok(outcome)) => Ok(Json(json!({"ok":true,"action":input.action,"request_id":input.request_id,
             "restarted":outcome.restarted,"engine_ready":outcome.engine_ready,"window_count":1,
@@ -467,7 +522,22 @@ impl WindowRpc {
                 return Err(INVALID_REPLY);
             }
             if !response.ok {
-                return Err(UNAVAILABLE);
+                let reason = match response.reason.as_deref() {
+                    Some("busy") => "busy",
+                    Some("canceled") => "canceled",
+                    Some("unsupported_windows") => "unsupported_windows",
+                    Some("unstable_tabs") => "unstable_tabs",
+                    Some("unsupported_groups") => "unsupported_groups",
+                    Some("window_count_changed") => "window_count_changed",
+                    Some("no_window") => "no_window",
+                    Some("restore_mismatch") => "restore_mismatch",
+                    _ => "operation_failed",
+                };
+                return Err(Failure::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "浏览器扩展无法完成窗口操作，请检查窗口和标签页状态。",
+                )
+                .at("extension", reason));
             }
             let window_count = response
                 .window_count
@@ -515,9 +585,8 @@ struct WireWindowReply {
     window_count: Option<u32>,
     tab_count: Option<u32>,
     fingerprint: Option<String>,
-    // Never relay or log extension-provided diagnostics.
-    #[serde(rename = "reason")]
-    _reason: Option<String>,
+    // Only explicitly allowlisted reason codes may leave this module.
+    reason: Option<String>,
 }
 fn valid_fingerprint(value: &str) -> bool {
     value.len() == 64
@@ -534,8 +603,81 @@ enum Command {
     Restart,
     Maximize,
 }
+impl Command {
+    fn stage(self) -> &'static str {
+        match self {
+            Self::Inspect => "inspect",
+            Self::Ensure => "ensure",
+            Self::Restart => "restart",
+            Self::Maximize => "maximize",
+        }
+    }
+}
+fn supervisor_failure(value: &Value, request: &SupervisorRequest) -> Failure {
+    // Older runtimes sent uncorrelated arbitrary error text. Never reflect it.
+    if value.get("stage").is_none() && value.get("reason").is_none() {
+        return UNAVAILABLE;
+    }
+    if value["command"] != json!(request.command)
+        || value["request_id"] != request.request_id
+        || value.as_object().is_none_or(|v| {
+            v.keys().any(|key| {
+                !["ok", "command", "request_id", "stage", "reason", "error"].contains(&key.as_str())
+            })
+        })
+    {
+        return INVALID_REPLY;
+    }
+    let stage = match value["stage"].as_str() {
+        Some("validation") => "validation",
+        Some("inspect") => "inspect",
+        Some("desktop") => "desktop",
+        Some("ensure") => "ensure",
+        Some("restart") => "restart",
+        Some("maximize") => "maximize",
+        Some("transport") => "transport",
+        _ => return INVALID_REPLY,
+    };
+    let (reason, message) = match value["reason"].as_str() {
+        Some("invalid_request") => (
+            "invalid_request",
+            "浏览器控制协议不兼容，请检查网关与运行环境版本。",
+        ),
+        Some("inspect_failed") if stage == "inspect" => (
+            "inspect_failed",
+            "无法读取浏览器窗口，请检查此配置的显示服务和窗口管理器。",
+        ),
+        Some("desktop_unavailable") => (
+            "desktop_unavailable",
+            "桌面服务不可用，请检查此配置的运行日志。",
+        ),
+        Some("maximize_failed") if stage == "maximize" => (
+            "maximize_failed",
+            "无法确认窗口已最大化，请检查窗口管理器。",
+        ),
+        Some("canceled") => ("canceled", "浏览器操作已取消，未自动重试。"),
+        Some("timed_out") => ("timed_out", "浏览器操作超时，请确认当前状态后再重试。"),
+        Some("stale_epoch") => ("stale_epoch", "浏览器实例已变更，请刷新控制权限后重试。"),
+        Some("restart_unavailable") => (
+            "restart_unavailable",
+            "无法安全重启浏览器，请检查此配置的运行日志。",
+        ),
+        Some("close_unconfirmed") => (
+            "close_unconfirmed",
+            "无法确认浏览器已关闭，请检查当前状态，避免重复重启。",
+        ),
+        Some("operation_failed") => (
+            "operation_failed",
+            "浏览器生命周期操作失败，请检查此配置的运行日志。",
+        ),
+        _ => return INVALID_REPLY,
+    };
+    Failure::new(StatusCode::SERVICE_UNAVAILABLE, message).at(stage, reason)
+}
 #[derive(Clone, Debug, Serialize)]
 struct SupervisorRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    viewport: Option<Viewport>,
     command: Command,
     request_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -552,6 +694,10 @@ struct SupervisorReply {
     process_running: bool,
     window_count: u32,
     engine_ready: bool,
+    #[serde(default)]
+    display_width: Option<u32>,
+    #[serde(default)]
+    display_height: Option<u32>,
     #[serde(rename = "restarted")]
     _restarted: bool,
     #[serde(rename = "reason")]
@@ -559,6 +705,15 @@ struct SupervisorReply {
 }
 impl SupervisorReply {
     fn validate(&self, request: &SupervisorRequest) -> Result<(), Failure> {
+        if self
+            .display_width
+            .is_some_and(|w| !(320..=7680).contains(&w))
+            || self
+                .display_height
+                .is_some_and(|h| !(240..=4320).contains(&h))
+        {
+            return Err(INVALID_REPLY);
+        }
         if !self.ok {
             return Err(UNAVAILABLE);
         }
@@ -611,7 +766,7 @@ async fn exchange<T: AsyncRead + AsyncWrite + Unpin>(
     }
     let value: Value = serde_json::from_slice(&bytes).map_err(|_| INVALID_REPLY)?;
     if value["ok"] == false {
-        return Err(UNAVAILABLE);
+        return Err(supervisor_failure(&value, request));
     }
     let response: SupervisorReply = serde_json::from_value(value).map_err(|_| INVALID_REPLY)?;
     response.validate(request)?;
@@ -652,9 +807,15 @@ impl Backend for SystemBackend {
         Box::pin(async move {
             let deadline = Instant::now() + Duration::from_millis(request.remaining_ms);
             let mut request = request;
-            let mut connection = tokio::net::UnixStream::connect("/data/run/reconnect.sock")
+            let mut connection = tokio::net::UnixStream::connect(&app.endpoints.control_path)
                 .await
-                .map_err(|_| UNAVAILABLE)?;
+                .map_err(|_| {
+                    Failure::new(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "无法连接浏览器控制服务，请检查此配置的运行日志。",
+                    )
+                    .at("transport", "connect_failed")
+                })?;
             check_owner(app, owner).await?;
             request.remaining_ms = remaining(deadline, 25_000)?;
             tokio::time::timeout(
@@ -662,7 +823,13 @@ impl Backend for SystemBackend {
                 exchange(&mut connection, &request),
             )
             .await
-            .map_err(|_| UNAVAILABLE)?
+            .map_err(|_| {
+                Failure::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "浏览器控制服务响应超时，请先确认当前状态。",
+                )
+                .at("transport", "response_timeout")
+            })?
         })
     }
     fn extension<'a>(
@@ -699,7 +866,13 @@ impl Backend for SystemBackend {
                 },
             )
             .await
-            .map_err(|_| UNAVAILABLE)??;
+            .map_err(|_| {
+                Failure::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "等待浏览器扩展连接超时，请检查扩展及原生消息服务。",
+                )
+                .at("extension", "connection_timeout")
+            })??;
             tokio::time::timeout(
                 Duration::from_millis(remaining(
                     request.deadline,
@@ -708,8 +881,14 @@ impl Backend for SystemBackend {
                 receiver,
             )
             .await
-            .map_err(|_| UNAVAILABLE)?
-            .map_err(|_| UNAVAILABLE)?
+            .map_err(|_| {
+                Failure::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "浏览器扩展未及时确认窗口操作，请检查扩展状态。",
+                )
+                .at("extension", "response_timeout")
+            })?
+            .map_err(|_| UNAVAILABLE.at("extension", "disconnected"))?
         })
     }
 }
@@ -756,6 +935,13 @@ impl Operation<'_> {
         epoch: Option<&str>,
     ) -> Result<SupervisorReply, Failure> {
         let request = SupervisorRequest {
+            // Inspect is observational; the supervisor accepts geometry only
+            // on the fixed commands that can apply it.
+            viewport: if command == Command::Inspect {
+                None
+            } else {
+                self.input.viewport
+            },
             command,
             request_id: self.input.request_id.clone(),
             expected_epoch: epoch.map(str::to_owned),
@@ -767,7 +953,8 @@ impl Operation<'_> {
             self.backend
                 .supervisor(self.app, self.owner, request.clone()),
         )
-        .await?;
+        .await
+        .map_err(|error| error.at(command.stage(), "control_unavailable"))?;
         response.validate(&request)?;
         Ok(response)
     }
@@ -793,7 +980,8 @@ impl Operation<'_> {
             self.owner,
             self.backend.extension(self.app, self.owner, request),
         )
-        .await?;
+        .await
+        .map_err(|error| error.at("extension", "operation_failed"))?;
         if reply.window_count != 1
             || reply.tab_count == 0
             || reply.tab_count > MAX_EXTENSION_TABS
@@ -942,6 +1130,7 @@ mod tests {
     }
     fn input(action: Action) -> Input {
         Input {
+            viewport: None,
             action,
             request_id: Uuid::new_v4().to_string(),
             operation_scope: Uuid::new_v4().to_string(),
@@ -959,6 +1148,258 @@ mod tests {
             .unwrap()
             .push(json!("window_control"));
         ready
+    }
+
+    struct PythonSupervisor {
+        connection: Mutex<tokio::io::Join<tokio::process::ChildStdout, tokio::process::ChildStdin>>,
+        child: tokio::process::Child,
+        calls: Mutex<Vec<Command>>,
+    }
+    impl PythonSupervisor {
+        fn new(absent: bool, viewport: Option<Viewport>) -> Self {
+            Self::with_resize_failure(absent, viewport, false)
+        }
+        fn with_resize_failure(absent: bool, viewport: Option<Viewport>, failure: bool) -> Self {
+            Self::with_failures(absent, viewport, failure, None)
+        }
+        fn with_failures(
+            absent: bool,
+            viewport: Option<Viewport>,
+            failure: bool,
+            control_failure: Option<&str>,
+        ) -> Self {
+            let mut command = tokio::process::Command::new("python3");
+            command
+                .arg(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/window_supervisor_contract.py"
+                ))
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::inherit())
+                .kill_on_drop(true);
+            if absent {
+                command.arg("--absent");
+            }
+            if failure {
+                command.arg("--resize-failure");
+            }
+            if let Some(stage) = control_failure {
+                command.arg("--control-failure").arg(stage);
+            }
+            if let Some(viewport) = viewport {
+                command
+                    .arg("--viewport")
+                    .arg(viewport.width.to_string())
+                    .arg(viewport.height.to_string());
+            }
+            let mut child = command
+                .spawn()
+                .expect("Python3 is required for the supervisor wire contract");
+            let connection =
+                tokio::io::join(child.stdout.take().unwrap(), child.stdin.take().unwrap());
+            Self {
+                connection: Mutex::new(connection),
+                child,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+        async fn finish(mut self) {
+            // Closing stdin, rather than flushing it, terminates the fixture loop.
+            drop(self.connection);
+            let status = tokio::time::timeout(Duration::from_secs(5), self.child.wait())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                status.success(),
+                "Python supervisor contract fixture failed"
+            );
+        }
+    }
+    impl Backend for PythonSupervisor {
+        fn supervisor<'a>(
+            &'a self,
+            _: &'a App,
+            _: &'a Owner,
+            request: SupervisorRequest,
+        ) -> Phase<'a, SupervisorReply> {
+            Box::pin(async move {
+                self.calls.lock().await.push(request.command);
+                // Exercise the same serializer/framing/parser as SystemBackend,
+                // with Python's actual supervisor on the other end of pipes.
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    exchange(&mut *self.connection.lock().await, &request),
+                )
+                .await
+                .map_err(|_| UNAVAILABLE)?
+            })
+        }
+        fn extension<'a>(
+            &'a self,
+            _: &'a App,
+            _: &'a Owner,
+            request: ExtensionRequest,
+        ) -> Phase<'a, WindowReply> {
+            Box::pin(async move {
+                assert_eq!(request.expected_count, 1);
+                Ok(WindowReply {
+                    window_count: 1,
+                    tab_count: 3,
+                    fingerprint: request.fingerprint.unwrap_or_else(fingerprint),
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn viewport_workflows_cross_actual_rust_wire_and_python_supervisor() {
+        for action in [Action::Ensure, Action::Restart] {
+            for absent in [false, true] {
+                for viewport in [
+                    None,
+                    Some(Viewport {
+                        width: 1920,
+                        height: 1080,
+                    }),
+                ] {
+                    let fixture = Fixture::new(vec![]).await;
+                    let backend = PythonSupervisor::new(absent, viewport);
+                    let mut input = input(action);
+                    input.viewport = viewport;
+                    input.validate().unwrap();
+                    let result = workflow(
+                        &fixture.app,
+                        &fixture.owner,
+                        &input,
+                        &backend,
+                        Instant::now() + OPERATION_LIFETIME,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(result.restarted, action == Action::Restart);
+                    assert!(result.engine_ready);
+                    let calls = backend.calls.lock().await.clone();
+                    let expected = if absent {
+                        vec![
+                            Command::Inspect,
+                            Command::Ensure,
+                            Command::Inspect,
+                            Command::Maximize,
+                        ]
+                    } else if action == Action::Restart {
+                        vec![
+                            Command::Inspect,
+                            Command::Inspect,
+                            Command::Restart,
+                            Command::Inspect,
+                            Command::Maximize,
+                        ]
+                    } else {
+                        vec![Command::Inspect, Command::Inspect, Command::Maximize]
+                    };
+                    assert_eq!(calls, expected);
+                    backend.finish().await;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_optional_geometry_and_resize_failure_do_not_block_lifecycle() {
+        for action in [Action::Ensure, Action::Restart] {
+            for absent in [false, true] {
+                for viewport in [
+                    json!({"width":0,"height":900}),
+                    json!("invalid"),
+                    json!({"width":true,"height":900}),
+                    json!({"width":1920,"height":1080,"extra":"PRIVATE"}),
+                    json!({"width":1920,"height":1080}),
+                ] {
+                    let fixture = Fixture::new(vec![]).await;
+                    let base = input(action);
+                    let parsed: Input = serde_json::from_value(json!({"viewport":viewport,"action":action,"request_id":base.request_id,"operation_scope":base.operation_scope,"operation_sequence":"1"})).unwrap();
+                    parsed.validate().unwrap();
+                    let backend =
+                        PythonSupervisor::with_resize_failure(absent, parsed.viewport, true);
+                    let outcome = workflow(
+                        &fixture.app,
+                        &fixture.owner,
+                        &parsed,
+                        &backend,
+                        Instant::now() + OPERATION_LIFETIME,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(outcome.restarted, action == Action::Restart);
+                    let calls = backend.calls.lock().await;
+                    assert_eq!(
+                        calls.iter().filter(|c| **c == Command::Restart).count(),
+                        usize::from(action == Action::Restart && !absent)
+                    );
+                    assert_eq!(
+                        calls.iter().filter(|c| **c == Command::Ensure).count(),
+                        usize::from(absent)
+                    );
+                    drop(calls);
+                    backend.finish().await;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn supervisor_diagnostics_cross_real_wire_without_exception_payloads() {
+        for (stage, reason) in [
+            ("inspect", "inspect_failed"),
+            ("maximize", "maximize_failed"),
+        ] {
+            let fixture = Fixture::new(vec![]).await;
+            let backend = PythonSupervisor::with_failures(false, None, false, Some(stage));
+            let failure = workflow(
+                &fixture.app,
+                &fixture.owner,
+                &input(Action::Ensure),
+                &backend,
+                Instant::now() + OPERATION_LIFETIME,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(failure.diagnostic, Some((stage, reason)));
+            let message = failure.response().1;
+            assert!(!message.contains("PRIVATE") && !message.contains("https://"));
+            backend.finish().await;
+        }
+    }
+    #[test]
+    fn malformed_unknown_and_stale_diagnostic_codes_are_not_reflected() {
+        let request = SupervisorRequest {
+            viewport: None,
+            command: Command::Inspect,
+            request_id: Uuid::new_v4().to_string(),
+            expected_epoch: None,
+            remaining_ms: 1000,
+        };
+        let valid = json!({"ok":false,"command":"inspect","request_id":request.request_id,"stage":"inspect","reason":"inspect_failed","error":"PRIVATE"});
+        assert_eq!(
+            supervisor_failure(&valid, &request).diagnostic,
+            Some(("inspect", "inspect_failed"))
+        );
+        for (field, value) in [
+            ("stage", json!("PRIVATE")),
+            ("reason", json!("PRIVATE")),
+            ("request_id", json!(Uuid::new_v4().to_string())),
+            ("command", json!("maximize")),
+            ("reason", json!({"PRIVATE":"payload"})),
+            ("extra", json!("PRIVATE")),
+        ] {
+            let mut bad = valid.clone();
+            bad[field] = value;
+            let error = supervisor_failure(&bad, &request);
+            assert!(error.diagnostic.is_none());
+            assert!(!error.response().1.contains("PRIVATE"));
+        }
     }
 
     #[tokio::test]
@@ -1042,6 +1483,25 @@ mod tests {
         assert!(receiver.await.unwrap().is_err());
         assert!(rpc.begin(WindowAction::Ensure, 0, None, 10001).is_err());
         assert!(rpc.begin(WindowAction::Ensure, 0, None, 0).is_err());
+        for (reason, expected) in [
+            (json!("busy"), Some(("extension", "busy"))),
+            (
+                json!("PRIVATE https://secret.invalid/token"),
+                Some(("extension", "operation_failed")),
+            ),
+            (json!({"PRIVATE":"payload"}), None),
+        ] {
+            let mut rpc = WindowRpc::default();
+            rpc.connected();
+            let (request, receiver) = rpc.begin(WindowAction::Ensure, 0, None, 10000).unwrap();
+            let mut response = window_reply(&request);
+            response["ok"] = json!(false);
+            response["reason"] = reason;
+            let _ = rpc.reply(response);
+            let failure = receiver.await.unwrap().unwrap_err();
+            assert_eq!(failure.diagnostic, expected);
+            assert!(!failure.response().1.contains("PRIVATE"));
+        }
     }
 
     #[tokio::test]
@@ -1214,6 +1674,8 @@ mod tests {
                     browser_epoch: step.epoch.into(),
                     process_running: step.running,
                     window_count: step.windows,
+                    display_width: None,
+                    display_height: None,
                     engine_ready: step.engine_ready,
                     _restarted: request.command == Command::Restart,
                     _reason: None,
@@ -1685,6 +2147,7 @@ mod tests {
     #[tokio::test]
     async fn supervisor_protocol_is_bounded_fixed_and_rejects_stale_or_secret_responses() {
         let request = SupervisorRequest {
+            viewport: None,
             command: Command::Inspect,
             request_id: Uuid::new_v4().to_string(),
             expected_epoch: None,
@@ -2017,6 +2480,7 @@ mod tests {
     #[tokio::test]
     async fn pending_supervisor_exchange_is_cancelable_without_resending_the_command() {
         let request = SupervisorRequest {
+            viewport: None,
             command: Command::Inspect,
             request_id: Uuid::new_v4().to_string(),
             expected_epoch: None,

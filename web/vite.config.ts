@@ -18,6 +18,7 @@ export default defineConfig({
     proxy: {
       '/api/clipboard/ws': { target: 'ws://127.0.0.1:8080', ws: true },
       '/api': 'http://127.0.0.1:8080',
+      '/p/': { target: 'http://127.0.0.1:8080', ws: true },
       '/downloads': 'http://127.0.0.1:8080',
       '/novnc': 'http://127.0.0.1:8080',
       '/ws': { target: 'ws://127.0.0.1:8080', ws: true },

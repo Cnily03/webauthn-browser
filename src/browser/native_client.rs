@@ -17,6 +17,7 @@ use std::time::Instant;
 
 #[derive(Clone, Debug)]
 pub struct Attempt {
+    profile_authority: Option<crate::profiles::access::Authority>,
     token: String,
     csrf: String,
     session: Option<String>,
@@ -25,15 +26,19 @@ pub struct Attempt {
 impl Attempt {
     fn new(inner: &Inner, headers: &HeaderMap) -> Self {
         Self {
+            profile_authority: crate::profiles::access::Authority::capture(headers),
             token: token(),
             csrf: cookie(headers, "ab_csrf").unwrap().to_owned(),
             session: cookie(headers, "ab_vnc").map(str::to_owned),
-            epoch: inner.vnc_epoch,
+            epoch: crate::auth::vnc_epoch(inner, headers),
         }
     }
     fn matches(&self, inner: &Inner, headers: &HeaderMap, supplied: &str) -> bool {
-        self.token == supplied
-            && self.epoch == inner.vnc_epoch
+        self.profile_authority
+            .as_ref()
+            .is_none_or(|a| a.valid(inner) && a.same(headers))
+            && self.token == supplied
+            && self.epoch == crate::auth::vnc_epoch(inner, headers)
             && Some(self.csrf.as_str()) == cookie(headers, "ab_csrf")
             && self.session.as_deref() == cookie(headers, "ab_vnc")
     }

@@ -120,7 +120,7 @@ export default function KeyForm({ keyData, onSave, onCancel, onDirtyChange }: Ke
     }
   };
   return <Paper component="form" variant="outlined" className="key-form" onSubmit={submit} onChange={dirty} aria-labelledby={`${prefix}-title`}>
-    <Stack spacing={3}>
+    <Stack spacing={3} useFlexGap>
       <Box><Typography id={`${prefix}-title`} variant="h3">{creating ? '添加虚拟验证器' : '编辑验证器'}</Typography>{!creating && <Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>{keyData.name || '未命名验证器'}</Typography>}</Box>
       <Box className="form-grid">
         <TextField autoFocus label="昵称" name="key-name" value={name} onChange={e => setName(e.target.value)} required disabled={working} slotProps={{ htmlInput: { maxLength: 200 } }} placeholder="日常登录" />

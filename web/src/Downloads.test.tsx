@@ -1,18 +1,17 @@
 import { StrictMode } from 'react';
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Downloads from './Downloads';
 import { renderMaterial } from './test-render';
 
 const file = {name: 'webauthn-helper.exe', url: '/downloads/webauthn-helper.exe', size: 1536, created_at: '2026-10-12T03:04:05Z'};
 let files: typeof file[];
-let unauthorized = vi.fn<() => void>();
 beforeEach(() => {
-  files = [{...file}]; unauthorized = vi.fn();
+  files = [{...file}];
   vi.stubGlobal('fetch', vi.fn(async () => Response.json({files})));
 });
 afterEach(() => vi.unstubAllGlobals());
-const mount = () => renderMaterial(<Downloads onUnauthorized={unauthorized} />);
+const mount = () => renderMaterial(<Downloads />);
 
 describe('Material download file list', () => {
   it('shows only filename, genuine creation time and readable size with native download links', async () => {
@@ -67,24 +66,25 @@ describe('Material download file list', () => {
     expect(await screen.findByRole('link', {name: 'new.bin'})).toBeVisible(); expect(screen.queryByRole('link', {name: file.name})).toBeNull();
     expect(globalThis.fetch).toHaveBeenCalledTimes(3);
   });
-  it('hands a current 401 to the VNC scope', async () => {
+  it('shows a retryable list error for a current 401', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({error: 'locked'}, {status: 401}))); mount();
-    await waitFor(() => expect(unauthorized).toHaveBeenCalledOnce()); expect(screen.queryByRole('alert')).toBeNull();
+    expect(await screen.findByRole('alert')).toHaveTextContent('locked');
+    expect(screen.getByRole('button', {name: '重试'})).toBeVisible();
   });
   it.each([200, 401])('aborts and ignores a late %s response after leaving', async status => {
     let resolve!: (response: Response) => void; let signal!: AbortSignal;
     vi.stubGlobal('fetch', vi.fn((_input, init) => {signal = init.signal; return new Promise<Response>(done => {resolve = done;});}));
     const view = mount(); view.unmount(); expect(signal.aborted).toBe(true);
     await act(async () => {resolve(Response.json(status === 200 ? {files} : {error: 'locked'}, {status}));});
-    expect(unauthorized).not.toHaveBeenCalled(); expect(screen.queryByRole('link')).toBeNull();
+    expect(screen.queryByRole('link')).toBeNull();
   });
   it('ignores the abandoned StrictMode request when the current request succeeds', async () => {
     let resolve!: (response: Response) => void;
     vi.stubGlobal('fetch', vi.fn().mockImplementationOnce(() => new Promise<Response>(done => {resolve = done;})).mockImplementation(async () => Response.json({files})));
-    render(<StrictMode><Downloads onUnauthorized={unauthorized} /></StrictMode>);
+    render(<StrictMode><Downloads /></StrictMode>);
     expect(await screen.findByRole('link', {name: file.name})).toBeVisible();
     await act(async () => resolve(Response.json({error: 'old login expired'}, {status: 401})));
-    expect(unauthorized).not.toHaveBeenCalled(); expect(screen.getByRole('link', {name: file.name})).toBeVisible();
+    expect(screen.getByRole('link', {name: file.name})).toBeVisible();
   });
   it.each(['javascript:alert(1)', '//other.example/file', '/downloads/../api/logout', '/downloads/%2E%2E/api/logout', '/downloads/file?token=secret', '/downloads/\\example'])('rejects an unsafe download URL %s', async url => {
     files = [{...file, url}]; mount();

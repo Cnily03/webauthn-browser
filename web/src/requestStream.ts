@@ -1,4 +1,5 @@
 import { describeEngineConnection } from './engineConnection';
+import { browserApiPath, profileViewerHeaders } from './profiles';
 import { localNavigationIdentity, navigationGeneration, validateLocalNavigationEvent, type LocalNavigationEvent } from './localNavigation';
 
 /** Trusted outer-page request stream. Lifecycle events never authorize a decision. */
@@ -246,9 +247,9 @@ export class RequestStream {
       const session = await this.options.refreshStatus();
       if (!current()) return;
       if (!session.vnc_authenticated) { this.stop(); this.options.onUnauthorized(); return; }
-      const headers: Record<string, string> = {'Accept': 'text/event-stream', 'X-CSRF-Token': session.csrf_token};
+      const headers: Record<string, string> = {'Accept': 'text/event-stream', 'X-CSRF-Token': session.csrf_token, ...profileViewerHeaders()};
       if (this.cursor) headers['Last-Event-ID'] = this.cursor;
-      const response = await (this.options.fetch ?? fetch)('/api/requests/events', {
+      const response = await (this.options.fetch ?? fetch)(browserApiPath('/api/requests/events'), {
         method: 'GET', headers, credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
       });
       if (!current()) { await response.body?.cancel().catch(() => {}); return; }

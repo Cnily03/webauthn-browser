@@ -43,7 +43,7 @@ semantics and maximizes. Unsaved forms and clear-on-exit session data are not
 promised. Failure is visible; see [browser lifecycle](browser-lifecycle.md).
 
 Open `http://localhost:8080/` for the noVNC desktop or
-`http://localhost:8080/settings` for security/key management. Only 8080 is public;
+`http://localhost:8080/settings` for security, browser profiles and authenticators. Only 8080 is public;
 VNC listens on container loopback. Private inherited browser-control pipes expose
 no TCP debugger. No host device, privileged mode or `.env` is required. Compose
 passes `--no-sandbox` at runtime; `docker build` does not launch Chromium. Docker's
@@ -55,9 +55,12 @@ exploits the browser could read container keys, browser data and mounted `./.dat
 Use trusted content. The entrypoint briefly uses root to initialize only a fresh
 dedicated directory, then drops privileges; it does not recursively change host files.
 
-Both access passwords are initially disabled. Configure independent VNC-page and
-Settings passwords as needed; Unicode is supported with no minimum length or
-complexity policy. VNC uses web access control, not the old eight-byte VNC password
+Access passwords are initially disabled. Configure the global Settings password
+under Security and individual profile passwords under Browser settings as needed;
+Unicode is supported without a complexity policy. Profile passwords must be
+nonempty whenever the enabled protection switch is saved, even on an existing
+protected profile. Switch protection off and save to allow passwordless access.
+VNC uses web access control, not the old eight-byte VNC password
 limit. With a password disabled, anyone able to reach that function can use it.
 Compose exposes all host interfaces; the direct-run example above is loopback-only.
 For remote access, use a trusted HTTPS reverse proxy, HTTPS-only/HSTS policy and
@@ -88,6 +91,38 @@ labels remain unchanged. Old backups with no Provider retain the historical
 `Auth Browser` default. `/opt/webauthn-browser` is the image installation path,
 not persistent storage. Follow [migration](data-migration.md) before replacing an
 old Compose service; never run old/new instances against one profile.
+
+## Profiles and concurrent viewers
+
+Browser settings contains the multi-profile switch and profile list. Each profile
+has independent browser data, optional access protection and an idle timeout;
+the authenticator library remains shared. Open `/profile/{name}` directly, or use
+`/` to resume a remembered default or select a profile in multi-profile mode.
+The profile icon follows the leftmost collapse button and hides with the
+navigation links. It opens remembered profiles; its add action opens the
+chooser. Expand a profile in Browser settings to edit it inline.
+
+With multi-profile mode off, `/` opens `default`, every `/profile/*` page redirects
+to `/`, and other profiles become
+unavailable without losing their configured enabled flags or data. The default
+profile cannot be renamed or deleted. Remembered credentials have a rolling
+30-day inactivity limit; menu entries remain until explicitly forgotten. Mode
+changes preserve valid remembered access. The menu marks the current profile
+green, invalid authentication orange, and unavailable identities red. Right-side
+status tooltips explain the distinction; detailed errors use the global notice.
+Clicking the current row does nothing. Removing an inactive row needs a second
+click within three seconds and clears only that browser's saved access.
+Deleting a non-default profile in Settings is different: its confirmation
+authorizes permanent deletion of all that profile's browser data after its
+connections are revoked and runtime shutdown is confirmed. Back up needed data
+before confirming; creating the same name later starts with fresh storage.
+
+The first eligible viewer owns that profile's authentication engine. Other
+viewers do not receive approval or native-helper authority. Actual user activity
+extends the configured idle deadline (180 seconds by default); automatic network
+traffic does not. On page entry or manual browser reconnection, the active
+owner's current viewport sets the bounded VNC display size, including shrinking.
+See [profile rules](profiles.md).
 
 ## Live text clipboard
 
@@ -174,14 +209,18 @@ BLE GATT. A software key's `usb` label is unrelated to physical attachment. See
 
 ### Downloads
 
-The navigation's Downloads page (`/downloads` or `/downloads/`) lists filenames,
+The global Downloads page (`/downloads`, without a profile selector) lists filenames,
 filesystem birth times and readable sizes using Material UI. Unsupported birth
 time is shown as a dash, never substituted with modification time. Navigation
-between browser, Settings and Downloads preserves Native ownership.
+between browser, Settings and Downloads preserves Native ownership. The page,
+global listing and `/downloads/{filename}` files are public and require no
+password, even when browser or Settings passwords are enabled. Publish only
+files intended for everyone who can reach this server.
 
 `/api/downloads` lists every top-level ordinary file, including documents, empty
 files and helper binaries, without requiring a recognized name/format. Links use
-`/downloads/{filename}`; `/download/{filename}` is the same streaming handler.
+`/downloads/{filename}`. The legacy `/download/{filename}` uses the same streaming
+handler but retains its browser-password boundary.
 The older `/api/companion/*` names remain authorization-equivalent aliases of
 `/api/helper/*`. React escapes names and URL-encodes filenames. Downloads are
 attachments with `application/octet-stream`, never inline HTML/SVG. Streaming has
@@ -204,9 +243,10 @@ The legacy `/api/helper/downloads` catalog admits only six known executable
 platform names after format checks and publishes actual size/SHA-256. It is
 separate from the general directory and has an immutable startup snapshot.
 
-A release source archive may include its prepared `downloads/` alongside source;
-all contents are Git-ignored. A Git checkout must create the directory and build
-helpers using [their instructions](../helper/README.md), or add the intended files.
+The default source archive includes an empty `downloads/` directory. Its runtime
+contents are Git-ignored and are never Docker build inputs. Compose creates the
+host directory when absent and mounts it; existing download files stay untouched.
+Build helpers using [their instructions](../helper/README.md), or add intended files.
 Generated `web/dist/` and compiler targets are not source inputs; build them locally
 or through Docker. No historical Git rewrite is required.
 

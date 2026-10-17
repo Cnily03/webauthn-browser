@@ -23,7 +23,14 @@ pub(crate) fn app() -> (App, std::path::PathBuf) {
     let (revoked, _) = watch::channel(0);
     (
         App {
+            profile_scope: false,
+            profile_name: None,
+            profile_id: std::sync::Arc::from("default"),
+            endpoints: std::sync::Arc::new(crate::profiles::runtime::Endpoints::legacy()),
+            profiles: None,
             inner: Arc::new(Mutex::new(Inner {
+                profile_viewers: std::collections::HashMap::new(),
+                viewer_tickets: std::collections::HashMap::new(),
                 store,
                 sessions: HashMap::new(),
                 csrf: HashMap::new(),

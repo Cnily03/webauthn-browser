@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Alert, Box, Button, CircularProgress, Link, Paper, Stack, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Typography } from '@mui/material';
-import { ApiError, request } from './api';
+import { request } from './api';
 
 interface DownloadFile { name: string; url: string; size: number; created_at: string | null }
 const sizeUnits = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
@@ -20,15 +20,16 @@ function CreationTime({value}: {value: string | null}) {
 }
 function readFiles(value: unknown): DownloadFile[] {
   if (!value || typeof value !== 'object' || !('files' in value) || !Array.isArray(value.files)) throw new Error('无法读取下载列表。');
+  const prefix = '/downloads/';
   return value.files.map(file => {
     if (!file || typeof file !== 'object' || typeof file.name !== 'string' || typeof file.url !== 'string'
-      || !/^\/downloads\/[^/?#\\]+$/.test(file.url) || new URL(file.url, window.location.origin).pathname !== file.url
+      || !file.url.startsWith(prefix) || !/^[^/?#\\]+$/.test(file.url.slice(prefix.length)) || new URL(file.url, window.location.origin).pathname !== file.url
       || !Number.isSafeInteger(file.size) || file.size < 0 || (file.created_at !== null && typeof file.created_at !== 'string')) throw new Error('无法读取下载列表。');
     return {name: file.name, url: file.url, size: file.size, created_at: file.created_at};
   });
 }
 
-export default function Downloads({onUnauthorized}: {onUnauthorized: () => void}) {
+export default function Downloads() {
   const [files, setFiles] = useState<DownloadFile[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -37,15 +38,14 @@ export default function Downloads({onUnauthorized}: {onUnauthorized: () => void}
     let active = true;
     const controller = new AbortController();
     setLoading(true); setError('');
-    void request<unknown>('/api/downloads', 'GET', undefined, {signal: controller.signal})
+    void request<unknown>('/api/downloads', 'GET', undefined, {signal: controller.signal, scope: 'global'})
       .then(value => { if (active) setFiles(readFiles(value)); })
       .catch(error => {
         if (!active) return;
-        if (error instanceof ApiError && error.status === 401) { onUnauthorized(); return; }
         setError(error instanceof Error ? error.message : '无法读取下载列表。');
       }).finally(() => { if (active) setLoading(false); });
     return () => { active = false; controller.abort(); };
-  }, [onUnauthorized, version]);
+  }, [version]);
   return <Box className="downloads-page">
     <Typography variant="h1" sx={{mb: 3}}>下载</Typography>
     {loading ? <Stack role="status" aria-label="正在读取下载列表" direction="row" spacing={2} sx={{alignItems: 'center', py: 4}}><CircularProgress size={22} /><Typography variant="body2">正在读取…</Typography></Stack>

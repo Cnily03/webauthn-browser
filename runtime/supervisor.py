@@ -38,6 +38,19 @@ if _browser_cdp is None:
     _cdp_spec.loader.exec_module(_browser_cdp)
 
 
+_profile_modules = {}
+for _name in ("profile_context", "profile_wire", "profile_resources", "display_size"):
+    _spec = importlib.util.spec_from_file_location(f"auth_browser_{_name}", Path(__file__).with_name(f"{_name}.py"))
+    if not _spec.origin or not Path(_spec.origin).exists():
+        continue
+    _module = sys.modules.get(_spec.name)
+    if _module is None:
+        _module = importlib.util.module_from_spec(_spec)
+        sys.modules[_spec.name] = _module
+        _spec.loader.exec_module(_module)
+    _profile_modules[_name] = _module
+
+
 SANDBOX_FAILURE = (
     "Chromium could not start with its sandbox intact. Inspect its preceding log. "
     "Namespace creation may be denied by container seccomp, AppArmor, or host "
@@ -46,16 +59,87 @@ SANDBOX_FAILURE = (
     "backup export remain available; the desktop is unavailable. "
     "See docs/startup-troubleshooting.md."
 )
-STATUS_PATH = Path("/data/run/runtime.json")
-RECONNECT_PATH = Path("/data/run/reconnect.sock")
+RUN_PATH = Path(os.environ.get("AUTH_BROWSER_PROFILE_RUNTIME_DIR", "/data/run"))
+STATUS_PATH = RUN_PATH / "runtime.json"
+RECONNECT_PATH = RUN_PATH / "reconnect.sock"
+PROFILE_PATH = Path(os.environ.get("AUTH_BROWSER_PROFILE_DATA_DIR", "/data/chromium"))
+PROFILE_ID = os.environ.get("AUTH_BROWSER_PROFILE_ID")
+DISPLAY = os.environ.get("DISPLAY", ":99") if PROFILE_ID is not None else ":99"
+VNC_PORT = int(os.environ.get("AUTH_BROWSER_PROFILE_VNC_PORT", "5900"))
 EXTENSION_UPGRADE_URL = "chrome-extension://hjfbndgjlhfjaplmakeicgoibanbncaf/upgrade.html"
-CACHE_PATH = Path("/tmp/webauthn-browser-cache")
+CACHE_PATH = Path(os.environ["XDG_CACHE_HOME"]) if PROFILE_ID is not None else Path("/tmp/webauthn-browser-cache")
 EXTENSION_UPGRADE_ATTEMPTS = 2
 EXTENSION_UPGRADE_TIMEOUT = 15
 
 
 class BrowserUnavailable(RuntimeError):
     """The browser can recover without terminating the X/VNC desktop."""
+
+
+# Only fixed codes and fixed text cross the public diagnostic boundary.
+CONTROL_MESSAGES = {
+    "invalid_request": "Invalid browser control request; check gateway/runtime versions.",
+    "invalid_viewport": "Optional viewport ignored; continuing without resizing.",
+    "inspect_failed": "Window inspection failed; check the profile display and window manager.",
+    "desktop_unavailable": "Desktop services are unavailable; check the profile runtime log.",
+    "maximize_failed": "Window maximization could not be confirmed; check the window manager.",
+    "resize_failed": "Optional resizing failed; continuing at the current display size.",
+    "resize_query_failed": "Optional resizing could not read the display; continuing without confirmed dimensions.",
+    "resize_mode_failed": "Optional resizing could not create a mode; continuing without confirmed dimensions.",
+    "resize_attach_failed": "Optional resizing could not attach a mode; continuing without confirmed dimensions.",
+    "resize_apply_failed": "Optional resizing could not apply a mode; continuing without confirmed dimensions.",
+    "resize_unconfirmed": "Optional resizing was not confirmed; continuing without reporting resized dimensions.",
+    "canceled": "Browser request canceled; no automatic retry was made.",
+    "timed_out": "Browser request timed out; check current state before retrying.",
+    "stale_epoch": "Browser generation changed; refresh ownership before retrying.",
+    "restart_unavailable": "Owned browser restart is unavailable; check the profile runtime log.",
+    "close_unconfirmed": "Browser close was not confirmed; check current state before retrying.",
+    "operation_failed": "Browser lifecycle operation failed; check the profile runtime log.",
+}
+CONTROL_STAGES = frozenset(("validation", "inspect", "desktop", "resize", "ensure", "restart", "maximize", "reconnect", "transport"))
+
+
+def control_diagnostic(stage, reason, *, warning=False):
+    stage = stage if stage in CONTROL_STAGES else "transport"
+    reason = reason if reason in CONTROL_MESSAGES else "operation_failed"
+    text = f"Browser control [{stage}/{reason}]: {CONTROL_MESSAGES[reason]}"
+    print(f"[supervisor] {'warning' if warning else 'failed'} {text}", file=sys.stderr, flush=True)
+    return stage, reason, text
+
+
+def control_phase(stage, operation):
+    try:
+        return operation()
+    except Exception as error:
+        # Preserve the original exception class for cancellation and lifecycle
+        # handling; only this fixed phase label is used by the response mapper.
+        error.browser_control_stage = stage
+        raise
+
+
+def control_failure(message, error):
+    command = message.get("command") if isinstance(message, dict) else None
+    command = command if command in ("inspect", "ensure", "restart", "maximize", "reconnect") else None
+    stage = getattr(error, "browser_control_stage", command or "validation")
+    known = {
+        "Unsupported browser command": "invalid_request",
+        "Unsupported runtime command": "invalid_request",
+        "Invalid browser command lifetime": "invalid_request",
+        "Browser request canceled.": "canceled",
+        "Browser operation timed out.": "timed_out",
+        "Browser generation changed.": "stale_epoch",
+        "Desktop is unavailable.": "desktop_unavailable",
+        "Owned browser restart is unavailable.": "restart_unavailable",
+        "Browser did not finish closing.": "close_unconfirmed",
+    }
+    # Exact known strings select codes, never become response/log content.
+    reason = known.get(str(error), {"inspect": "inspect_failed", "maximize": "maximize_failed"}.get(stage, "operation_failed"))
+    stage, reason, text = control_diagnostic(stage, reason)
+    response = {"ok": False, "stage": stage, "reason": reason, "error": text}
+    request_id = message.get("request_id") if isinstance(message, dict) else None
+    if command is not None and isinstance(request_id, str) and re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", request_id):
+        response.update(command=command, request_id=request_id)
+    return response
 
 
 def control_request_live(connection):
@@ -106,15 +190,9 @@ def prepare_cache_dir(path=CACHE_PATH):
 
 
 def prepare_x_socket_dir(path=Path("/tmp/.X11-unix")):
-    # Normally root-owned 1777 from the image build. A /tmp tmpfs hides that
-    # directory, so recreate it as the non-root user without elevating privileges.
-    if path.is_symlink():
-        raise RuntimeError("X socket directory must not be a symbolic link")
-    if not path.exists():
-        path.mkdir(mode=0o1777)
-        path.chmod(0o1777)  # umask 077 must not strip X socket directory access
-    if not path.is_dir() or path.stat().st_mode & 0o7777 != 0o1777:
-        raise RuntimeError("X socket directory must be a directory with mode 1777")
+    # The manager prepares this once before it accepts concurrent profile starts.
+    # Workers still validate it before attaching their separate display socket.
+    return _profile_modules["profile_context"].prepare_x_socket_dir(path)
 
 
 class Supervisor:
@@ -123,12 +201,18 @@ class Supervisor:
         self.children = []
         self.stopping = False
         self.control = None
+        self.profile_control = None
+        self.profile_epoch = os.environ.get("AUTH_BROWSER_PROFILE_EPOCH", secrets.token_hex(16))
+        self.profile_gateway_token = None
+        self.profile_deadline = None
+        self.profile_engine_pending = False
         self.fido_control = _fido_control.FidoController.from_environment()
         self.browser_closed_reported = False
         self.browser_epoch = secrets.token_hex(16)
         self.browser_pipe = None
         self.browser_pipe_process = None
         self.browser_operations = {}
+        self.viewport_failures = {}
         self.gateway_started = False
         self.gateway_retry_at = None
         self.gateway_backoff = 1.0
@@ -159,15 +243,19 @@ class Supervisor:
         role = "gateway" if name == "gateway" else "browser" if name == "Chromium" else None
         child_control = None
         options = {"start_new_session": True}
-        if self.fido_control is not None or role == "browser":
+        if self.fido_control is not None or role == "browser" or PROFILE_ID is not None:
             environment = os.environ.copy()
             # Control descriptors and hook ownership belong only to their
             # explicit child. Even secondary launchers get a clean copy.
             for key in tuple(environment):
                 if key.startswith("UHF_") or key in (
                         "LD_PRELOAD", "AUTH_BROWSER_EXPERIMENTAL_FIDO_RELAY",
-                        "AUTH_BROWSER_FIDO_CONTROL_FD", "AUTH_BROWSER_FIDO_GATEWAY_EPOCH"):
+                        "AUTH_BROWSER_FIDO_CONTROL_FD", "AUTH_BROWSER_FIDO_GATEWAY_EPOCH",
+                        "AUTH_BROWSER_PROFILE_CONTROL_TOKEN", "AUTH_BROWSER_PROFILE_CONTROL_PATH",
+                        "AUTH_BROWSER_PROFILE_WORKER_FD"):
                     environment.pop(key)
+            if PROFILE_ID is not None:
+                environment["AUTH_BROWSER_RESOURCE_ROLE"] = ("browser" if name.startswith("Chromium") else "desktop")
             options["env"] = environment
         if self.fido_control is not None and role is not None:
             try:
@@ -287,8 +375,9 @@ class Supervisor:
                     ready = self.proxy_ready()
                 except (OSError, ValueError):
                     ready = False
-                if ready and self.browser_crash_recovery:
+                if ready and (self.browser_crash_recovery or self.profile_engine_pending):
                     self.browser_crash_recovery = False
+                    self.profile_engine_pending = False
                     self.browser_closed_reported = False
                     self.write_status("ready", "Chromium and authentication engine reconnected. Retry any canceled sign-in.")
                 if not ready:
@@ -347,6 +436,10 @@ class Supervisor:
             self.browser_unavailable(error)
 
     def check_children(self, require_browser=True):
+        if self.profile_control is not None:
+            self.serve_profile_control()
+        if self.profile_deadline is not None and time.monotonic() >= self.profile_deadline:
+            raise BrowserUnavailable("Profile startup timed out.")
         if self.stopping:
             raise InterruptedError("shutdown requested")
         if self.fido_control is not None:
@@ -386,7 +479,7 @@ class Supervisor:
 
     def display_ready(self):
         result = subprocess.run(
-            ["xdpyinfo", "-display", ":99"],
+            ["xdpyinfo", "-display", DISPLAY],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2,
         )
         return result.returncode == 0
@@ -394,7 +487,13 @@ class Supervisor:
     def proxy_ready(self):
         # Public status confirms the extension attached, without depending on
         # /readyz (which itself waits for this supervisor's ready state).
-        request = urllib.request.Request("http://127.0.0.1:8080/api/status")
+        request = urllib.request.Request(
+            f"http://127.0.0.1:8080/api/runtime/profiles/{PROFILE_ID}/engine"
+            if PROFILE_ID is not None else "http://127.0.0.1:8080/api/status")
+        if PROFILE_ID is not None:
+            if self.profile_gateway_token is None:
+                return False
+            request.add_header("X-Profile-Control-Token", self.profile_gateway_token)
         with self.opener.open(request, timeout=2) as response:
             status = json.load(response)
         if status.get("mode_error") == "extension_upgrade_required":
@@ -405,7 +504,7 @@ class Supervisor:
             return self.extension_upgrade_readiness(
                 status.get("control_connected") is True
                 and {"private D-Bus", "BlueZ bridge"}.issubset(live)
-                and Path("/data/run/ble.sock").is_socket())
+                and (RUN_PATH / "ble.sock").is_socket())
         return self.extension_upgrade_readiness(status.get("engine_connected") is True)
 
     def extension_upgrade_readiness(self, ready):
@@ -478,7 +577,7 @@ class Supervisor:
 
     @staticmethod
     def vnc_ready():
-        with socket.create_connection(("127.0.0.1", 5900), timeout=2) as connection:
+        with socket.create_connection(("127.0.0.1", VNC_PORT), timeout=2) as connection:
             return connection.recv(12).startswith(b"RFB ")
 
     def shutdown(self, desktop_only=False):
@@ -518,33 +617,47 @@ class Supervisor:
 
     def write_status(self, state, message):
         temporary = STATUS_PATH.with_suffix(".tmp")
-        temporary.write_text(json.dumps({"state": state, "message": message, "sandbox_enabled": not self.no_sandbox}))
+        temporary.write_text(json.dumps({"state": state, "message": message, "sandbox_enabled": not self.no_sandbox, "updated_at_unix_ms": time.time_ns() // 1_000_000}))
         os.replace(temporary, STATUS_PATH)
 
-    def start_desktop(self):
+    def start_desktop(self, *, wait_engine=True):
         # Do not inherit a host/launcher session address (including disabled:).
         # Both buses belong to this container and are supervised independently.
         self.spawn("private session D-Bus", ["dbus-daemon", "--session", "--nofork", "--nopidfile",
-                   "--address=unix:path=/data/run/dbus-session.sock"])
+                   f"--address=unix:path={RUN_PATH}/dbus-session.sock"])
         self.wait_ready("private session D-Bus", self.session_dbus_ready)
         self.spawn("private D-Bus", ["dbus-daemon", "--nofork", "--nopidfile",
-                   "--config-file=/opt/webauthn-browser/runtime/dbus-system.conf"])
+                   f"--config-file={RUN_PATH / 'dbus-system.conf'}" if PROFILE_ID is not None else "--config-file=/opt/webauthn-browser/runtime/dbus-system.conf"])
         self.wait_ready("private D-Bus", self.dbus_ready)
         self.spawn("BlueZ bridge", [sys.executable, "/opt/webauthn-browser/runtime/bluez_bridge.py"])
         self.wait_ready("BlueZ bridge", self.bluez_ready)
         prepare_x_socket_dir()
-        self.spawn("Xvfb", ["Xvfb", ":99", "-screen", "0", "1440x900x24", "-nolisten", "tcp"])
+        self.spawn("Xvfb", ["Xvfb", DISPLAY, "-screen", "0",
+                              "3840x2160x24" if PROFILE_ID is not None else "1440x900x24", "-noreset", "-nolisten", "tcp"])
         self.wait_ready("Xvfb", self.display_ready)
+        xvfb = next((child for name, child in self.children if name == "Xvfb"), None)
+        if PROFILE_ID is not None and xvfb is not None:
+            _profile_modules["profile_resources"].record_display(
+                RUN_PATH, self.profile_epoch, os.environ["AUTH_BROWSER_RESOURCE_GENERATION"],
+                xvfb.pid, int(os.environ["AUTH_BROWSER_PROFILE_SLOT"]))
+        if PROFILE_ID is not None:
+            try:
+                _profile_modules["display_size"].initialize(DISPLAY, env=os.environ)
+            except _profile_modules["display_size"].DisplaySizeError as error:
+                # Xvfb readiness is already confirmed; optional initial sizing
+                # must not prevent the remaining desktop services from starting.
+                control_diagnostic("resize", error.code, warning=True)
         self.spawn("Openbox", ["openbox", "--sm-disable"])
         self.spawn("clipboard bridge", [sys.executable, "/opt/webauthn-browser/runtime/clipboard_bridge.py"])
-        self.wait_ready("clipboard bridge", lambda: Path("/data/run/clipboard.sock").is_socket())
+        self.wait_ready("clipboard bridge", lambda: (RUN_PATH / "clipboard.sock").is_socket())
         self.spawn("x11vnc", [
-            "x11vnc", "-display", ":99", "-listen", "127.0.0.1", "-localhost",
-            "-rfbport", "5900", "-forever", "-shared", "-nopw", "-noxdamage", "-nosel",
+            "x11vnc", "-display", DISPLAY, "-listen", "127.0.0.1", "-localhost",
+            "-rfbport", str(VNC_PORT), "-forever", "-shared", "-nopw", "-noxdamage", "-nosel", "-xrandr",
         ])
         self.wait_ready("x11vnc", self.vnc_ready)
         self.start_browser()
-        self.wait_ready("Chromium", self.proxy_ready, timeout=45)
+        self.wait_ready("Chromium", self.proxy_ready if wait_engine else self.browser_ready,
+                        timeout=45 if wait_engine else 15)
 
     @staticmethod
     def session_dbus_ready():
@@ -564,7 +677,7 @@ class Supervisor:
 
     @staticmethod
     def bluez_ready():
-        if not Path("/data/run/ble.sock").is_socket():
+        if not (RUN_PATH / "ble.sock").is_socket():
             return False
         result = subprocess.run(["dbus-send", "--system", "--print-reply", "--reply-timeout=1000",
                                  "--dest=org.bluez", "/", "org.freedesktop.DBus.ObjectManager.GetManagedObjects"],
@@ -573,7 +686,7 @@ class Supervisor:
 
     def browser_command(self, new_window=False, restore_session=False):
         chrome_command = [
-            "/usr/bin/chromium", "--user-data-dir=/data/chromium",
+            "/usr/bin/chromium", f"--user-data-dir={PROFILE_PATH}",
             f"--disk-cache-dir={CACHE_PATH / 'chromium'}",
             "--no-first-run", "--no-default-browser-check", "--disable-dev-shm-usage",
             "--disable-background-mode",
@@ -754,8 +867,19 @@ class Supervisor:
         if (command not in ("inspect", "ensure", "restart", "maximize")
                 or not isinstance(request_id, str)
                 or re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", request_id) is None
-                or set(message) - {"command", "request_id", "expected_epoch", "remaining_ms"}):
+                or set(message) - {"command", "request_id", "expected_epoch", "remaining_ms", "viewport"}):
             raise ValueError("Unsupported browser command")
+        viewport = message.get("viewport")
+        if viewport is not None and (not isinstance(viewport, dict)
+                or set(viewport) != {"width", "height"}
+                or any(type(viewport[key]) is not int or not 1 <= viewport[key] <= 16384
+                       for key in ("width", "height"))):
+            control_diagnostic("validation", "invalid_viewport", warning=True)
+            viewport = None
+        # Older gateways attached valid geometry to every phase. Observation
+        # accepts that envelope but must never resize or apply the dimensions.
+        if command == "inspect":
+            viewport = None
         remaining_ms = message.get("remaining_ms", 25000)
         if type(remaining_ms) is not int or not 1 <= remaining_ms <= 25000:
             raise ValueError("Invalid browser command lifetime")
@@ -773,13 +897,13 @@ class Supervisor:
             raise BrowserUnavailable("Browser generation changed.")
         if self.stopping:
             raise InterruptedError("shutdown requested")
-        self.check_children(require_browser=False)
+        control_phase("desktop", lambda: self.check_children(require_browser=False))
         # Child maintenance can replace the owned process. Recheck the epoch
         # after it runs so an earlier inspect cannot authorize the replacement.
         if command != "inspect" and message.get("expected_epoch") != self.browser_epoch:
             raise BrowserUnavailable("Browser generation changed.")
         browser = next((child for name, child in self.children if name == "Chromium"), None)
-        windows = self.browser_windows()
+        windows = control_phase("inspect", self.browser_windows)
         remaining(25)
         running = browser is not None and browser.poll() is None
         restarted = False
@@ -787,6 +911,32 @@ class Supervisor:
         if command != "inspect":
             if not self.display_ready() or not self.vnc_ready():
                 raise BrowserUnavailable("Desktop is unavailable.")
+        geometry = None
+
+        def resize_viewport():
+            # Revalidate owner-request liveness between individual RandR calls;
+            # an observer cannot invoke this through ordinary VNC resizing.
+            # Match this admitted request's viewport, including shrinking.
+            if viewport is None:
+                return None
+            now = time.monotonic()
+            self.viewport_failures = {key: until for key, until in self.viewport_failures.items() if until > now}
+            if request_id in self.viewport_failures or len(self.viewport_failures) >= 128:
+                return None
+            try:
+                return _profile_modules["display_size"].resize(
+                    DISPLAY, viewport["width"], viewport["height"], env=os.environ,
+                    check=lambda: remaining(25))
+            except _profile_modules["display_size"].DisplaySizeError as error:
+                # A failed apply may already have changed the screen. Do not
+                # retry, claim rollback, or report unconfirmed dimensions.
+                self.viewport_failures[request_id] = now + 60
+                control_diagnostic("resize", error.code, warning=True)
+                return None
+
+        if command != "restart":
+            geometry = resize_viewport()
+            remaining(25)
         if command == "restart":
             # An auxiliary singleton handoff may still target this profile; do
             # not close its owner while that handoff can race the fresh launch.
@@ -805,6 +955,8 @@ class Supervisor:
                 raise BrowserUnavailable("Owned browser restart is unavailable.")
             if len(windows) != 1:
                 raise BrowserUnavailable("One browser window is required.")
+            geometry = resize_viewport()
+            remaining(25)
             self.write_status("recovering", "Restarting browser; restoring saved tabs.")
             close_error = None
             try:
@@ -837,7 +989,7 @@ class Supervisor:
             self.start_browser(restore_session=True)
             restarted = True
             self.wait_ready("Chromium", self.browser_ready, timeout=remaining(10), require_browser=False)
-            windows = self.browser_windows()
+            windows = control_phase("inspect", self.browser_windows)
         elif command == "ensure" and not windows:
             if not running:
                 if browser is not None:
@@ -847,15 +999,15 @@ class Supervisor:
                 self.start_browser(restore_session=True)
                 restarted = True
                 self.wait_ready("Chromium", self.browser_ready, timeout=remaining(10), require_browser=False)
-                windows = self.browser_windows()
+                windows = control_phase("inspect", self.browser_windows)
             # A live background browser with zero confirmed windows is handled
             # by the authenticated extension's fixed windows.create operation.
         elif command == "maximize":
             remaining(25)
             if len(windows) != 1:
                 raise BrowserUnavailable("One browser window is required.")
-            self.restore_browser(budget=remaining)
-            windows = self.browser_windows()
+            control_phase("maximize", lambda: self.restore_browser(budget=remaining))
+            windows = control_phase("inspect", self.browser_windows)
             if len(windows) != 1:
                 raise BrowserUnavailable("Browser windows changed.")
             remaining(25)
@@ -868,9 +1020,12 @@ class Supervisor:
             self.write_status("ready" if engine_ready else "recovering",
                               "Desktop is ready." if engine_ready else "Browser restored; engine reconnecting.")
         browser = next((child for name, child in self.children if name == "Chromium"), None)
-        return {"ok": True, "command": command, "request_id": request_id,
-                "browser_epoch": self.browser_epoch, "process_running": browser is not None and browser.poll() is None,
-                "window_count": len(windows), "engine_ready": bool(engine_ready), "restarted": restarted}
+        response = {"ok": True, "command": command, "request_id": request_id,
+                    "browser_epoch": self.browser_epoch, "process_running": browser is not None and browser.poll() is None,
+                    "window_count": len(windows), "engine_ready": bool(engine_ready), "restarted": restarted}
+        if geometry is not None:
+            response.update(display_width=geometry["width"], display_height=geometry["height"])
+        return response
 
     def open_control(self):
         if RECONNECT_PATH.is_symlink():
@@ -889,6 +1044,7 @@ class Supervisor:
             return
         with connection:
             connection.settimeout(1)
+            message = None
             try:
                 payload = b""
                 while b"\n" not in payload and len(payload) <= 512:
@@ -909,14 +1065,152 @@ class Supervisor:
                 except InterruptedError:
                     raise
                 except Exception as error:
-                    self.write_status("failed", str(error))
-                    response = {"ok": False, "error": str(error)}
+                    response = control_failure(message, error)
+                    self.write_status("failed", response["error"])
                 connection.sendall(json.dumps(response).encode() + b"\n")
             except (ValueError, OSError) as error:
                 try:
-                    connection.sendall(json.dumps({"ok": False, "error": str(error)}).encode() + b"\n")
+                    connection.sendall(json.dumps(control_failure(message, error)).encode() + b"\n")
                 except OSError:
                     pass
+
+    def prepare_profile_gateway(self):
+        if self.fido_control is None:
+            return {}, None
+        additions, endpoint = self.fido_control.prepare_child("gateway")
+        self.fido_control.channel_started("gateway")
+        return {"fido_gateway_epoch": additions["AUTH_BROWSER_FIDO_GATEWAY_EPOCH"]}, endpoint
+
+    def stop_profile(self):
+        """Disable a desktop without deleting data or hard-killing a live browser."""
+        if self.fido_control is not None:
+            self.fido_control.retire("gateway")
+        # A singleton launcher can become the primary after the prior process
+        # exits. Do not let generic desktop teardown signal that live browser
+        # before its ownership and private close can be confirmed.
+        if any(name == "Chromium window launcher" and child.poll() is None
+               for name, child in self.children):
+            raise BrowserUnavailable("Browser launcher is still active.")
+        browser = next((child for name, child in self.children if name == "Chromium"), None)
+        if browser is not None and browser.poll() is None:
+            if self.browser_pipe is None or browser is not self.browser_pipe_process:
+                raise BrowserUnavailable("Owned browser close is unavailable.")
+            try:
+                self.browser_pipe.close_browser(timeout=2)
+            except (OSError, ValueError, _browser_cdp.BrowserPipeError):
+                pass
+            deadline = time.monotonic() + 8
+            while browser.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if browser.poll() is None:
+                raise BrowserUnavailable("Browser did not finish closing.")
+        self.release_browser_pipe()
+        self.shutdown(desktop_only=True)
+        self.stopping = True
+
+    def serve_profile_control(self):
+        wire = _profile_modules["profile_wire"]
+        try:
+            message, rights = wire.receive(self.profile_control)
+        except BlockingIOError:
+            return
+        except (OSError, ValueError):
+            self.stopping = True
+            return
+        wire.close_rights(rights)
+        endpoint = None
+        response = {"ok": False, "error": "profile_command_failed"}
+        try:
+            if message.get("action") == "gateway_lost" and set(message) == {"action"}:
+                if self.fido_control is not None:
+                    self.fido_control.retire("gateway")
+                self.profile_gateway_token = None
+                self.profile_engine_pending = True
+                self.write_status("recovering", "Profile engine reconnecting.")
+                response = {"ok": True}
+            elif message.get("action") == "gateway" and set(message) == {"action", "token"}:
+                if not re.fullmatch(r"[0-9a-f]{64}", message.get("token", "")):
+                    raise ValueError("Invalid gateway capability")
+                self.profile_gateway_token = message["token"]
+                self.profile_engine_pending = True
+                response, endpoint = self.prepare_profile_gateway()
+                response.update(ok=True, runtime_epoch=self.profile_epoch)
+            elif message == {"action": "stop"}:
+                self.stop_profile()
+                response = {"ok": True, "stopped": True}
+            else:
+                raise ValueError("Unsupported profile command")
+        except (OSError, ValueError, BrowserUnavailable):
+            pass
+        try:
+            wire.send(self.profile_control, response, endpoint.fileno() if endpoint else None)
+        finally:
+            if endpoint is not None:
+                endpoint.close()
+
+    def run_profile(self, fd):
+        if os.getuid() == 0:
+            raise RuntimeError("Profile workers must be non-root")
+        context = _profile_modules["profile_context"]
+        paths = context.ProfilePaths(PROFILE_ID, int(os.environ["AUTH_BROWSER_PROFILE_SLOT"]))
+        expected = paths.environment({})
+        for key in ("DISPLAY", "AUTH_BROWSER_PROFILE_RUNTIME_DIR", "AUTH_BROWSER_PROFILE_DATA_DIR",
+                    "AUTH_BROWSER_PROFILE_VNC_PORT", "AUTH_BROWSER_PROXY_SOCKET", "HOME",
+                    "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME",
+                    "DBUS_SYSTEM_BUS_ADDRESS", "DBUS_SESSION_BUS_ADDRESS"):
+            if os.environ.get(key) != expected[key]:
+                raise ValueError("Profile environment does not match its immutable identity")
+        paths.prepare()
+        wire = _profile_modules["profile_wire"]
+        channel = socket.socket(fileno=fd)
+        if channel.family != socket.AF_UNIX or channel.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_SEQPACKET:
+            channel.close()
+            raise ValueError("Invalid profile management channel")
+        channel.set_inheritable(False)
+        channel.settimeout(5)
+        initial, rights = wire.receive(channel)
+        wire.close_rights(rights)
+        if set(initial) != {"action", "token"} or initial.get("action") != "start" or not re.fullmatch(r"[0-9a-f]{64}", initial.get("token", "")):
+            raise ValueError("Invalid profile startup")
+        self.profile_gateway_token = initial["token"]
+        # Copy the fixed packaged policy, replacing its one listen endpoint only.
+        # Canonical profile IDs cannot inject XML or D-Bus address syntax.
+        policy = Path(__file__).with_name("dbus-system.conf").read_text()
+        policy = policy.replace("unix:path=/data/run/dbus-system.sock", f"unix:path={RUN_PATH}/dbus-system.sock")
+        policy_path = RUN_PATH / "dbus-system.conf"
+        if policy_path.is_symlink():
+            raise ValueError("Unsafe profile D-Bus policy")
+        policy_path.write_text(policy)
+        policy_path.chmod(0o600)
+        self.open_control()
+        self.write_status("starting", "Profile desktop is starting.")
+        reply, endpoint = self.prepare_profile_gateway()
+        self.profile_deadline = time.monotonic() + 40
+        try:
+            # The gateway binds the proxy listener after receiving this reply.
+            # Window existence is a startup fact, never an engine-ready claim.
+            self.start_desktop(wait_engine=False)
+            self.profile_deadline = None
+            reply.update(ok=True, runtime_epoch=self.profile_epoch, engine_ready=False)
+            wire.send(channel, reply, endpoint.fileno() if endpoint else None)
+        except Exception:
+            wire.send(channel, {"ok": False, "error": "profile_start_failed"})
+            raise
+        finally:
+            if endpoint is not None:
+                endpoint.close()
+        channel.setblocking(False)
+        self.profile_control = channel
+        self.profile_engine_pending = True
+        self.write_status("recovering", "Profile started; engine connecting.")
+        try:
+            while not self.stopping:
+                self.check_children(require_browser=False)
+                self.maintain_browser()
+                self.serve_control()
+        finally:
+            channel.close()
+            self.profile_control = None
 
     def browser_unavailable(self, error):
         self.write_status("failed", str(error))
@@ -973,17 +1267,27 @@ class Supervisor:
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Run the WebAuthn Browser desktop and management gateway")
     parser.add_argument("--no-sandbox", action="store_true", help="Explicitly disable Chromium sandbox (unsafe for untrusted content)")
+    parser.add_argument("--profile-worker", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args(argv)
 
 
 def main():
     args = parse_args()
+    if not args.profile_worker:
+        spec = importlib.util.spec_from_file_location("auth_browser_profile_manager", Path(__file__).with_name("profile_manager.py"))
+        manager = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = manager
+        spec.loader.exec_module(manager)
+        return manager.main(no_sandbox=args.no_sandbox)
+    descriptor = os.environ.pop("AUTH_BROWSER_PROFILE_WORKER_FD", "")
+    if not descriptor.isdecimal() or int(descriptor) < 3:
+        raise ValueError("Profile worker requires its inherited management channel")
     supervisor = Supervisor(no_sandbox=args.no_sandbox)
     signal.signal(signal.SIGTERM, supervisor.request_stop)
     signal.signal(signal.SIGINT, supervisor.request_stop)
     result = 0
     try:
-        supervisor.run()
+        supervisor.run_profile(int(descriptor))
     except InterruptedError:
         print("[supervisor] Shutting down", flush=True)
     except Exception as error:
@@ -991,6 +1295,10 @@ def main():
         result = 1
     finally:
         supervisor.shutdown()
+        if result:
+            # Emit this reserved code only after all owned-service cleanup has
+            # returned. A killed worker cannot accidentally free its old slot.
+            result = _profile_modules["profile_context"].CLEAN_FAILURE_EXIT
     return result
 
 

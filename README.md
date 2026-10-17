@@ -16,22 +16,30 @@ uses `restart: unless-stopped`. Passwords are off by default: configure access
 passwords and a trusted network boundary before exposing the service.
 
 - [Browser](http://localhost:8080/): software/native mode and movable controls.
-- [Settings](http://localhost:8080/settings): authenticators, credentials, backups
-  and separate settings/desktop passwords.
+- [Settings](http://localhost:8080/settings): security, browser profiles, shared
+  authenticators and credential backups.
 - [Downloads](http://localhost:8080/downloads): filename, creation time when
-  available, size and direct downloads.
+  available, size and direct downloads. Public without a password; publish only
+  files intended for everyone who can reach the server.
 
 The host bind is now `./.data:/data`. **Existing deployments using `./data` must
 stop the container and back up that directory before renaming it to `./.data`;
 do not overwrite an existing destination.** Otherwise Compose can start with an
 empty profile. See [migration](docs/data-migration.md) before rebuilding older
-container-only deployments. No automatic migration is performed.
+container-only deployments. No automatic filesystem migration is performed.
 
 `./.data` retains browser history, cookies, user extension settings and keys.
 Image-owned engine and ZeroOmega assets update with the image. Mode and helper
 address preferences remain in the outer browser's localStorage without a TTL;
 pairing tokens do not. Noto CJK fonts provide Chinese glyphs without changing the
 browser's language or adding an input method.
+
+Enable multi-profile mode in Browser settings to create independent browser
+desktops at `/profile/{name}`. Each has its own cookies, extensions, optional
+password and engine idle timeout. The authenticator library is shared. Multiple
+viewers can open a profile; its first eligible viewer owns the authentication
+engine until release or inactivity (180 seconds by default). Remembered profile
+access expires after 30 unused days. See [profiles](docs/profiles.md).
 
 Initial page entry ensures one maximized browser window. Manual reconnect closes
 and relaunches Chromium, then verifies saved tabs; unsaved page state and
@@ -58,9 +66,10 @@ approval in the local helper; see [platform and validation limits](TESTING.md).
 [Startup troubleshooting](docs/startup-troubleshooting.md)
 
 Third-party notices are in [NOTICE](NOTICE).
-The source ZIP contains tracked source plus release files under `downloads/`.
-It excludes Git history, `web/dist/`, dependency folders and build caches. Docker
-builds the web assets from source; downloads are not tracked in Git.
+The source ZIP contains tracked source and an empty `downloads/` directory.
+Docker builds from a fresh checkout, including web assets and hash-verified
+ZeroOmega downloads. Runtime `./downloads` is mounted separately; existing files
+are not removed. Git history, compiled outputs and build caches are excluded.
 
 ## License
 

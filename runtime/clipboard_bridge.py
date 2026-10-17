@@ -19,7 +19,7 @@ MAX_WIRE = 6 * MAX_TEXT + 1024
 TIMEOUT = 30
 MAX_PENDING = 16
 CHUNK = 64 * 1024
-SOCKET_PATH = Path('/data/run/clipboard.sock')
+SOCKET_PATH = Path(os.environ.get('AUTH_BROWSER_PROFILE_RUNTIME_DIR', '/data/run')) / 'clipboard.sock'
 
 
 def text_bytes(value):

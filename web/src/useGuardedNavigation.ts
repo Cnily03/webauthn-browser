@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { clearProfileNavigation } from './profiles';
 
 export type NavigationGuard = (action: () => void) => boolean;
 const stateKey = '__webauthnBrowserNavigation';
@@ -15,7 +16,7 @@ function stateWithIndex(value: number) {
 // Keep the accepted page mounted while a traversal is awaiting confirmation.
 // Restore and replay real entries instead of overwriting them with replaceState.
 export function useGuardedNavigation(guard: NavigationGuard, enabled = true) {
-  const [url, setUrl] = useState(() => window.location.href);
+  const [url, setUrl] = useState(() => {clearProfileNavigation(); return window.location.href;});
   const accepted = useRef<Entry>({url: window.location.href, index: index() ?? 0});
   const observed = useRef<Entry>(accepted.current);
   const pending = useRef<Traversal | null>(null);
@@ -30,6 +31,7 @@ export function useGuardedNavigation(guard: NavigationGuard, enabled = true) {
     const changed = (event: PopStateEvent | HashChangeEvent) => {
       // A queued hashchange can arrive after a newer traversal has completed.
       if (event instanceof HashChangeEvent && event.newURL && event.newURL !== window.location.href) return;
+      clearProfileNavigation();
       let nextIndex = index();
       if (nextIndex === null) {
         // Native fragment navigation creates an entry without our state. Stamp
@@ -83,5 +85,13 @@ export function useGuardedNavigation(guard: NavigationGuard, enabled = true) {
       observed.current = next; publish(next); after?.();
     });
   }, [enabled, publish]);
-  return {url, navigate};
+  // Canonical aliases replace the accepted entry rather than growing history.
+  const replace = useCallback((destination: string) => {
+    if (!enabled || pending.current) return;
+    const next = {url: new URL(destination, accepted.current.url).href, index: accepted.current.index};
+    if (next.url === accepted.current.url) return;
+    window.history.replaceState(stateWithIndex(next.index), '', next.url);
+    observed.current = next; publish(next);
+  }, [enabled, publish]);
+  return {url, navigate, replace};
 }

@@ -114,7 +114,7 @@ class ContainerContractTests(unittest.TestCase):
         self.assertIn("data", (ROOT / ".dockerignore").read_text().splitlines())
         dockerfile = (ROOT / "Dockerfile").read_text()
         self.assertIn("AUTH_BROWSER_STORE=/data/auth-browser.json", dockerfile)
-        self.assertIn("--user-data-dir=/data/chromium", (ROOT / "runtime/supervisor.py").read_text())
+        self.assertIn("--user-data-dir=/data/chromium", supervisor.Supervisor().browser_command())
 
     def test_runtime_and_cache_are_transient_without_changing_profile_paths(self):
         compose = (ROOT / "docker-compose.yml").read_text()

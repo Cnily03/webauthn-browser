@@ -42,7 +42,7 @@ def prepare_data(path=DATA, uid=UID, gid=GID):
                 "recursively change host file ownership. Preserve your old "
                 "container and see docs/data-migration.md."
             )
-        for name in ("run", "chromium", "config", "cache", "auth-browser.json"):
+        for name in ("run", "chromium", "config", "cache", "profiles", "auth-browser.json"):
             try:
                 child = os.stat(name, dir_fd=fd, follow_symlinks=False)
             except FileNotFoundError:

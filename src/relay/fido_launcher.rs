@@ -192,6 +192,14 @@ impl Launcher {
             }
         }
     }
+    pub(crate) fn from_control(socket: ControlSocket, gateway: [u8; 16]) -> io::Result<Arc<Self>> {
+        Self::start(socket, gateway, false)
+    }
+    pub(crate) fn control_retired(&self) -> bool {
+        self.commands
+            .as_ref()
+            .is_some_and(|sender| sender.is_closed())
+    }
     pub(crate) fn available(&self) -> bool {
         self.commands.is_some() && *self.ready.borrow()
     }
@@ -1098,5 +1106,19 @@ mod tests {
             assert!(within(packet::receive(&reports)).await.is_err());
             assert!(launcher.available());
         }
+    }
+    #[tokio::test]
+    async fn control_retired_distinguishes_disabled_pending_and_closed() {
+        assert!(!Launcher::disabled().control_retired());
+        let (commands, receiver) = mpsc::channel(1);
+        let (_status, ready) = watch::channel(false);
+        let launcher = Launcher {
+            commands: Some(commands),
+            ready,
+        };
+        assert!(!launcher.available());
+        assert!(!launcher.control_retired());
+        drop(receiver);
+        assert!(launcher.control_retired());
     }
 }

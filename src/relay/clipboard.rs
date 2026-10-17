@@ -152,7 +152,7 @@ pub(crate) async fn websocket(
 ) -> Result<Response, (StatusCode, String)> {
     let inner = app.inner.lock().await;
     authorize(&inner, &headers, "vnc")?;
-    let epoch = inner.vnc_epoch;
+    let epoch = crate::auth::vnc_epoch(&inner, &headers);
     drop(inner);
     // Share the existing global stream budget; each connection has no queues.
     let permit = app
@@ -160,8 +160,7 @@ pub(crate) async fn websocket(
         .clone()
         .try_acquire_owned()
         .map_err(|_| fail(StatusCode::TOO_MANY_REQUESTS, "Too many live connections"))?;
-    let path = std::env::var("AUTH_BROWSER_CLIPBOARD_SOCKET")
-        .unwrap_or_else(|_| "/data/run/clipboard.sock".into());
+    let path = app.endpoints.clipboard_path.clone();
     Ok(ws
         .max_message_size(MAX_WIRE_BYTES)
         .max_frame_size(MAX_WIRE_BYTES)
@@ -184,7 +183,7 @@ pub(crate) async fn websocket(
 
 async fn still_authorized(app: &App, headers: &HeaderMap, epoch: u64) -> bool {
     let inner = app.inner.lock().await;
-    inner.vnc_epoch == epoch && authenticated(&inner, headers, "vnc")
+    crate::auth::vnc_epoch(&inner, headers) == epoch && authenticated(&inner, headers, "vnc")
 }
 
 async fn until_revoked<F: Future<Output = ()>>(
@@ -308,7 +307,14 @@ mod tests {
             store.data.vnc_password_hash = Some("test-hash".into());
             let (revoked, _) = watch::channel(0);
             let app = App {
+                profile_scope: false,
+                profile_name: None,
+                profile_id: std::sync::Arc::from("default"),
+                endpoints: std::sync::Arc::new(crate::profiles::runtime::Endpoints::legacy()),
+                profiles: None,
                 inner: Arc::new(Mutex::new(Inner {
+                    profile_viewers: std::collections::HashMap::new(),
+                    viewer_tickets: std::collections::HashMap::new(),
                     store,
                     sessions: HashMap::from([(
                         "session".into(),

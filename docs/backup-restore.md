@@ -1,12 +1,13 @@
 # Key backup and restore
 
-Settings → Virtual Keys provides export and restore. Version 1 JSON backups
+Settings → Authenticator management provides export and restore. Version 1 JSON backups
 contain software-key configuration, Argon2 hashes of each key's local verification
 password, website credentials and **unencrypted private keys**. Basic attestation
 also exports its independent attestation private key and complete certificate
 chain. Keep backups on trusted devices; do not share them or upload them to
-untrusted services. They exclude the Settings password, VNC password and browser
-profile, and do not replace a full offline backup of `./.data`.
+untrusted services. They exclude the Settings password, profile access passwords,
+remembered-access records and browser data, and do not replace a full offline
+backup of `./.data`. The authenticator library is shared by every browser profile.
 
 ## Restore procedure
 
@@ -18,7 +19,7 @@ profile, and do not replace a full offline backup of `./.data`.
 4. Separately confirm replacement. Restore replaces **all** software keys and
    their credentials; current keys absent from the backup are removed rather
    than implicitly merged. A key's local verification password follows that key.
-   The two access passwords and browser website data remain unchanged.
+   Settings/profile access passwords and browser website data remain unchanged.
 
 A preview lasts ten minutes and is bound to the current session, file contents
 and current storage. Registration, signature-counter advances or configuration

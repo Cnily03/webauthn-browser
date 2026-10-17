@@ -54,7 +54,16 @@ pub(crate) fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> 
                 .map(|(_, v)| v)
         })
 }
+pub(crate) fn vnc_epoch(inner: &Inner, headers: &HeaderMap) -> u64 {
+    crate::profiles::access::profile_id(headers)
+        .and_then(|id| inner.store.data.profile(id))
+        .map(|p| p.auth_revision)
+        .unwrap_or(inner.vnc_epoch)
+}
 pub(crate) fn authenticated(inner: &Inner, headers: &HeaderMap, scope: &str) -> bool {
+    if scope == "vnc" && crate::profiles::access::profile_id(headers).is_some() {
+        return crate::profiles::access::authorized(inner, headers);
+    }
     let (hash, epoch) = if scope == "vnc" {
         (&inner.store.data.vnc_password_hash, inner.vnc_epoch)
     } else {
@@ -111,6 +120,14 @@ pub(crate) async fn status(State(app): State<App>, headers: HeaderMap) -> Respon
     let mut broker = app.broker.lock().await;
     broker.expire();
     let mut i = app.inner.lock().await;
+    if app.profile_name.as_deref().is_some_and(|name| {
+        i.store
+            .data
+            .profile(&app.profile_id)
+            .is_none_or(|profile| profile.name != name)
+    }) {
+        return fail(StatusCode::NOT_FOUND, "配置不存在。").into_response();
+    }
     let now = Instant::now();
     i.sessions.retain(|_, s| s.expires > now);
     i.csrf.retain(|_, e| *e > now);
@@ -126,6 +143,19 @@ pub(crate) async fn status(State(app): State<App>, headers: HeaderMap) -> Respon
     i.csrf.insert(t.clone(), now + Duration::from_secs(86400));
     broker.validate_helper_owner(&i);
     let body = json!({"vnc_authenticated":authenticated(&i,&headers,"vnc"),"settings_authenticated":authenticated(&i,&headers,"settings"),"vnc_password_enabled":i.store.data.vnc_password_hash.is_some(),"settings_password_enabled":i.store.data.settings_password_hash.is_some(),"csrf_token":t,"engine_connected":broker.ready,"engine_message":if let Some(error) = broker.mode_error.as_deref() { error } else if broker.native_qr_mode { "Native relay mode ready; start registration or sign-in inside the container browser" } else if broker.mode_pending.is_some() { "Switching Chromium authentication mode" } else { i.engine_message.as_str() },"native_qr_mode":broker.native_qr_mode,"mode_switching":broker.mode_pending.is_some(),"mode_error":broker.mode_error,"control_connected":broker.outbound.is_some(),"browser_mode":broker.browser_mode(),"mode_generation":broker.mode_generation});
+    let mut body = body;
+    if app.profiles.is_some() {
+        if let Some(profile) = i.store.data.profile(&app.profile_id) {
+            body["profile"] = crate::profiles::api::public_summary(&i.store.data, profile);
+            body["vnc_password_enabled"] =
+                serde_json::json!(i.store.data.profile_password(profile).is_some());
+            body["engine_message"] = serde_json::json!(if broker.ready {
+                "Profile engine ready"
+            } else {
+                "Waiting for profile engine"
+            });
+        }
+    }
     let mut r = Json(body).into_response();
     set_cookie(&mut r, "ab_csrf", &t, false);
     r
@@ -164,6 +194,12 @@ pub(crate) async fn login(
     Json(input): Json<Login>,
 ) -> Result<Response, (StatusCode, String)> {
     check_scope(&input.scope)?;
+    if input.scope == "vnc" && app.profiles.is_some() {
+        if !app.profile_scope {
+            return Err(fail(StatusCode::BAD_REQUEST, "请使用明确的配置名称路径。"));
+        }
+        return crate::profiles::access::login(&app, &h, input.password).await;
+    }
     let now = Instant::now();
     let (hash, epoch) = {
         let mut i = app.inner.lock().await;
@@ -267,6 +303,12 @@ pub(crate) async fn logout(
     Json(input): Json<Scope>,
 ) -> Result<Response, (StatusCode, String)> {
     check_scope(&input.scope)?;
+    if input.scope == "vnc" && app.profiles.is_some() {
+        if !app.profile_scope {
+            return Err(fail(StatusCode::BAD_REQUEST, "请使用明确的配置名称路径。"));
+        }
+        return crate::profiles::access::logout(&app, &h).await;
+    }
     let name = if input.scope == "vnc" {
         "ab_vnc"
     } else {
@@ -327,23 +369,43 @@ pub(crate) async fn set_password(
     authorize(&i, &h, "settings")?;
     let old = i.store.data.clone();
     if input.scope == "vnc" {
-        i.store.data.vnc_password_hash = hash
+        i.store.data.vnc_password_hash = hash;
+        if app.profiles.is_some() {
+            let profile = i
+                .store
+                .data
+                .profiles
+                .iter_mut()
+                .find(|p| p.id == "default")
+                .unwrap();
+            profile.auth_revision = profile
+                .auth_revision
+                .checked_add(1)
+                .ok_or_else(|| fail(StatusCode::CONFLICT, "授权版本已耗尽。"))?;
+            i.store
+                .data
+                .profile_access_tokens
+                .retain(|t| t.profile_id != "default");
+        }
     } else {
         i.store.data.settings_password_hash = hash
     };
-    if let Err(e) = i.store.save() {
-        i.store.data = old;
-        return Err(fail(StatusCode::INTERNAL_SERVER_ERROR, e));
-    }
+    crate::profiles::commit(&mut i, old)?;
     if input.scope == "vnc" {
         i.vnc_epoch += 1
     } else {
         i.settings_epoch += 1
     }
+    if app.profiles.is_some() && input.scope == "vnc" {
+        crate::profiles::viewer::clear(&mut i, "default");
+    }
     i.sessions.retain(|_, s| s.scope != input.scope);
     app.revoked.send_modify(|v| *v += 1);
     drop(i);
     if input.scope == "vnc" {
+        if let Some(registry) = &app.profiles {
+            let _ = registry.revoke("default", false).await;
+        }
         app.broker
             .lock()
             .await

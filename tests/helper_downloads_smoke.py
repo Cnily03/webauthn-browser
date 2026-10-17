@@ -46,6 +46,11 @@ class Client:
         self.token = ''
 
     def request(self, path, body=None, method=None, token=None, headers=None):
+        # Compatibility helper routes use the default profile; public downloads do not.
+        if (path.startswith(('/api/helper/', '/api/companion/', '/download/'))
+                or path == '/api/status'
+                or path in ('/api/login', '/api/logout') and body and body.get('scope') == 'vnc'):
+            path = '/p/default' + path
         request_headers = {
             'Content-Type': 'application/json',
             'X-CSRF-Token': self.token if token is None else token,
@@ -231,7 +236,7 @@ def exercise_directory(tmp, binary):
         assert len(manifest['downloads']) + len(manifest['unavailable']) == 6
         assert {entry['filename'] for entry in manifest['downloads']} == builds
         for entry in manifest['downloads']:
-            assert entry['url'] == '/download/' + entry['filename']
+            assert entry['url'] == '/p/default/download/' + entry['filename']
             assert entry['mode'] in ('cli', 'desktop')
             source = directory / entry['filename']
             assert source.stat().st_size == entry['size']
@@ -273,18 +278,15 @@ def exercise_directory(tmp, binary):
         read_directory(client, names)
         client.expect_error('/downloads/README.md', (404,))
         client.expect_error('/download/README.md', (404,))
-        generation = client.json('/api/browser/mode')['generation']
-        for token, expected in (('', 403), (client.token, 409)):
-            client.expect_error('/api/browser/mode', (expected,),
-                                body={'mode': 'native', 'expected_generation': generation},
-                                token=token)
-        assert client.json('/api/helper/status')['active'] is False
+        # Download authority does not grant the tab engine/helper ownership.
+        client.expect_error('/api/browser/mode', (400,))
+        client.expect_error('/p/default/api/browser/mode', (403,))
+        client.expect_error('/api/helper/status', (403,))
 
-        # Every download surface is guarded by the existing VNC session, rather
-        # than the settings login or a separate download-specific password.
+        # General downloads are public and global even when browser access is
+        # password-protected. Compatibility helper routes retain profile auth.
         client.json('/api/security', {'scope': 'vnc', 'password': 'download-test-password'}, 'PUT')
-        protected = ('/api/downloads', '/downloads/page.html',
-                     '/download/page.html', '/api/helper/downloads', '/api/companion/downloads')
+        protected = ('/download/page.html', '/api/helper/downloads', '/api/companion/downloads')
         assert client.status()['vnc_authenticated'] is False
         for shell in ('/downloads', '/downloads/'):
             with Client().request(shell) as response:
@@ -293,10 +295,12 @@ def exercise_directory(tmp, binary):
         for path in protected:
             client.expect_error(path, (401,))
             Client().expect_error(path, (401,))
-        client.expect_error('/downloads/page.html', (401,), method='HEAD')
+        read_directory(Client(), names)
+        check_download(Client(), '/downloads/', b'page.html', directory / 'page.html')
+        check_download(Client(), '/downloads/', b'page.html', directory / 'page.html', 'HEAD')
         client.expect_error('/api/login', (401,), body={'scope': 'vnc', 'password': 'wrong'})
         client.json('/api/login', {'scope': 'settings', 'password': ''})
-        client.expect_error('/api/downloads', (401,))
+        read_directory(client, names)
         client.json('/api/login', {'scope': 'vnc', 'password': 'download-test-password'})
         assert client.status()['vnc_authenticated'] is True
         read_directory(client, names)
@@ -307,13 +311,17 @@ def exercise_directory(tmp, binary):
         client.json('/api/logout', {'scope': 'vnc'})
         for path in protected:
             client.expect_error(path, (401,))
+        read_directory(client, names)
+        check_download(client, '/downloads/', b'page.html', directory / 'page.html')
 
-    # The persisted VNC password still protects every route after restart.
+    # Persisted browser protection never makes general downloads private.
     with server(tmp, binary, directory) as client:
         status = client.status()
         assert status['vnc_password_enabled'] and not status['vnc_authenticated']
         for path in protected:
             client.expect_error(path, (401,))
+        read_directory(Client(), names)
+        check_download(Client(), '/downloads/', b'page.html', directory / 'page.html')
         client.json('/api/login', {'scope': 'vnc', 'password': 'download-test-password'})
         read_directory(client, names)
     return len(builds), tested_files
@@ -365,7 +373,7 @@ def main():
         exercise_missing_and_root_symlink(defaults_tmp, binary)
     print(f'PASS: {builds} real executable hashes; {files} regular-file downloads; '
           'streamed >64 MiB, empty/HTML/Unicode/raw Unix names, safe headers, '
-          'traversal/symlink/FIFO rejection, live directory changes, VNC login/logout/restart, '
+          'traversal/symlink/FIFO rejection, live directory changes, public access across VNC login/logout/restart, '
           'default/custom/missing/root-symlink directories')
 
 

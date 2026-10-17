@@ -57,7 +57,7 @@ fn hash(bytes: &[u8]) -> Vec<u8> {
     digest::digest(&digest::SHA256, bytes).as_ref().to_vec()
 }
 fn revision(data: &store::Data) -> Vec<u8> {
-    hash(&serde_json::to_vec(data).expect("serializable store"))
+    hash(&serde_json::to_vec(&data.keys).expect("serializable credentials"))
 }
 fn invalid() -> (StatusCode, String) {
     fail(
@@ -422,9 +422,18 @@ pub async fn confirm(
             }
         }
         pending.entry = None;
+        drop(pending);
+        drop(i);
+        drop(broker);
+        app.cancel_brokers("Key restore persistence uncertain")
+            .await;
         return Err(fail(StatusCode::INTERNAL_SERVER_ERROR,"保存或持久化确认失败，恢复结果未确认。请保留恢复前备份；如存储无法读取，请修复存储并重启服务，再检查当前验证器和通行密钥。"));
     }
     pending.entry = None;
+    drop(pending);
+    drop(i);
+    drop(broker);
+    app.cancel_brokers("Keys restored from backup").await;
     Ok(Json(json!({"ok":true})))
 }
 #[cfg(test)]
@@ -631,7 +640,14 @@ mod tests {
         csrf_tokens.insert("test".into(), Instant::now() + Duration::from_secs(600));
         let (revoked, _) = watch::channel(0);
         let app = App {
+            profile_scope: false,
+            profile_name: None,
+            profile_id: std::sync::Arc::from("default"),
+            endpoints: std::sync::Arc::new(crate::profiles::runtime::Endpoints::legacy()),
+            profiles: None,
             inner: Arc::new(Mutex::new(Inner {
+                profile_viewers: std::collections::HashMap::new(),
+                viewer_tickets: std::collections::HashMap::new(),
                 store,
                 sessions: HashMap::new(),
                 csrf: csrf_tokens,

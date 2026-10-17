@@ -13,9 +13,12 @@ use axum::{
 
 pub(crate) async fn guard(
     State(app): State<App>,
-    req: Request<axum::body::Body>,
+    mut req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
+    if let Err(e) = crate::profiles::admission::prepare(&app, &mut req).await {
+        return e.into_response();
+    }
     // Gateway reachability is deployment-defined: do not admit/reject requests
     // based on Host, Origin, forwarding headers, or Fetch Metadata. Optional
     // session passwords and cookie-bound CSRF checks remain independent.
@@ -39,7 +42,9 @@ pub(crate) async fn guard(
             return e.into_response();
         }
     }
+    let request_headers = req.headers().clone();
     let mut response = next.run(req).await;
+    crate::profiles::admission::renew_cookie(&app, &request_headers, &mut response).await;
     for (name, value) in [
         ("x-content-type-options", "nosniff"),
         ("x-frame-options", "DENY"),
@@ -274,7 +279,7 @@ mod tests {
         for path in [
             "/api/keys",
             "/api/requests",
-            "/api/downloads",
+            "/api/helper/downloads",
             "/ws",
             "/api/clipboard/ws",
         ] {

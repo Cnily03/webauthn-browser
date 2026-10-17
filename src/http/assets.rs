@@ -21,6 +21,14 @@ fn render_index(body: &str) -> Response {
     );
     response
 }
+pub(crate) async fn profile_index(
+    axum::extract::State(app): axum::extract::State<crate::app::App>,
+) -> Response {
+    if !app.inner.lock().await.store.data.multi_profile {
+        return axum::response::Redirect::temporary("/").into_response();
+    }
+    index().await
+}
 pub(crate) async fn index() -> Response {
     match tokio::fs::read_to_string("web/dist/index.html").await {
         Ok(body) => render_index(&body),
@@ -34,6 +42,35 @@ mod tests {
 
     use axum::{body::to_bytes, http::header};
 
+    #[tokio::test]
+    async fn single_mode_redirects_every_named_profile_path_to_root() {
+        let (app, dir) = crate::test_support::app();
+        for path in [
+            "/profile",
+            "/profile/",
+            "/profile/default",
+            "/profile/other/",
+            "/profile/other/nested?keep=none",
+        ] {
+            let response =
+                crate::test_support::call(&app, "GET", path, serde_json::json!(null), "", "", None)
+                    .await;
+            assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT, "{path}");
+            assert_eq!(response.headers()[header::LOCATION], "/");
+        }
+        app.inner.lock().await.store.data.multi_profile = true;
+        for path in ["/profile/default", "/profile/other/"] {
+            let response =
+                crate::test_support::call(&app, "GET", path, serde_json::json!(null), "", "", None)
+                    .await;
+            assert!(matches!(
+                response.status(),
+                StatusCode::OK | StatusCode::SERVICE_UNAVAILABLE
+            ));
+            assert!(!response.headers().contains_key(header::LOCATION));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     #[tokio::test]
     async fn material_styles_use_per_document_nonce_without_relaxing_scripts() {
         let html = "<meta name=\"csp-nonce\" content=\"__CSP_NONCE__\"><script src=\"/assets/app.js\"></script>";

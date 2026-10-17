@@ -20,6 +20,7 @@
     <component path="src/app.rs">Shared state, startup composition and owned controller instances.</component>
     <component path="src/http">HTTP routing, responses, static assets and secure download streaming.</component>
     <component path="src/auth">Passwords, authenticated sessions, CSRF and owner validation.</component>
+    <component path="src/profiles">Profile access, remembered sessions, isolated browser state and engine ownership.</component>
     <component path="src/settings">Authenticator settings and administrative configuration.</component>
     <component path="src/browser">Approval broker, event stream, browser window lifecycle and navigation notices.</component>
     <component path="src/relay">Native proxy, helper relay, clipboard and report transport adapters.</component>
@@ -56,10 +57,24 @@
     <reference path="docs/startup-troubleshooting.md" />
   </runtime-and-storage>
 
+  <profiles-and-ownership>
+    <rule>Keep the authenticator store and settings administration global. Each browser profile owns its Chromium data, display, VNC transport, clipboard, private IPC, request broker and native relay generations.</rule>
+    <rule>Resolve editable, case-insensitive public profile names to immutable server-generated identities on the backend. Ordinary frontend DTOs, API paths, cookies and storage use names only; profile UUIDs are restricted to backend storage and administrative Settings. Never construct runtime or persistent filesystem paths from a supplied profile name.</rule>
+    <rule>Keep default undeletable and unrenameable. Disabling multi-profile mode changes effective availability only: force default on and other profiles off without overwriting their saved enabled values.</rule>
+    <rule>Scope browser HTTP, event streams and WebSockets to the selected profile. A global settings session or another profile's credential must not silently grant browser-engine authority.</rule>
+    <rule>Grant engine ownership atomically to the first eligible viewer. Recheck its profile, viewer identity and generation around asynchronous operations; canceled or expired owners cannot affect a successor.</rule>
+    <rule>Use real user activity for the configured idle deadline. Polling, keepalive, reconnect loops, page visibility and server events are not user activity.</rule>
+    <rule>Remember profile access for a rolling 30-day inactivity window using revocable, profile-scoped credentials. Never persist raw passwords or live viewer, helper, relay or engine capabilities in localStorage.</rule>
+    <rule>Mode-only availability changes must preserve valid remembered profile credentials and local menu records while revoking live control. Authentication failure or credential expiry must not erase menu metadata. Explicit local forget clears only that browser's target credential and metadata, never the server profile or other browsers' sessions.</rule>
+    <rule>Only the active owner may resize a profile's display on connect or reconnect. Match the current requested viewport within validated bounds, including smaller or mixed-axis dimensions; a standby viewer must not resize another user's desktop. Optional sizing failures must not block browser lifecycle actions or cause a repeated restart; never swallow cancellation or claim unverified geometry.</rule>
+    <rule>Preserve legacy default browser data in place. Explicit Settings deletion of a non-default profile must revoke live access, confirm its owned processes have stopped, and permanently remove only its immutable-ID storage directory. Journal pending deletions durably; never purge historical orphan data or delete data for disable or local forget. Manual and automatic cleanup may resume only explicitly requested deletions already recorded in the durable journal.</rule>
+    <reference path="docs/profiles.md" />
+  </profiles-and-ownership>
+
   <browser-lifecycle>
     <rule>Initial authenticated page entry sends ensure: preserve a live browser, consolidate supported normal windows and maximize one window; create or restore only when absence is confirmed.</rule>
     <rule>Manual reconnect sends restart: consolidate first, close the owned browser through its private pipe, confirm clean exit, retire old capabilities, launch with the existing profile and verify saved tabs before reporting success.</rule>
-    <rule>Do not use an uncontrolled Chromium self-relaunch or a hard-kill fallback. Fresh processes require fresh FIDO control/report generations.</rule>
+    <rule>Do not use an uncontrolled Chromium self-relaunch or a hard-kill fallback for normal browser restart. Failed-instance cleanup may force-stop only revalidated, exactly owned processes after its bounded graceful timeout; unknown ownership remains pending. Fresh processes require fresh FIDO control/report generations.</rule>
     <rule>Private CDP exposes only fixed readiness and close operations. Never add a debugging TCP endpoint or accept arbitrary caller-supplied CDP methods, scripts, tab IDs or URLs.</rule>
     <rule>Preserve parent fd3/fd4, map child pipe descriptors collision-safely, and keep the control pipe open after RPC failure while the browser lives. EOF can itself close Chromium.</rule>
     <rule>Reject ambiguous window inventories and unsupported privacy/window/group cases. Move existing tabs and groups; do not discard extra windows by closing their contents.</rule>
@@ -85,7 +100,7 @@
 
   <web-and-extension>
     <rule>Keep helper address/Connect usable during retries. Bound unopened WebSocket establishment to one second; an open socket awaiting human approval is not a failed connection.</rule>
-    <rule>Persist only mode/address preferences in localStorage, not session capabilities. Preserve owned native-mode lifetime across ordinary SPA navigation.</rule>
+    <rule>Persist mode/address preferences and the non-secret saved-profile menu in localStorage, not session capabilities. Profile access credentials use their scoped browser cookie policy. Preserve owned native-mode lifetime across ordinary SPA navigation without resetting the idle deadline.</rule>
     <rule>Use Material UI components and built-in icons with consistent geometry. Preserve compact floating controls and monospace AAGUID/helper address content.</rule>
     <rule>Local-navigation offers require trustworthy non-manual provenance, authenticated fresh delivery and an explicit click. Never auto-open or fetch a local target.</rule>
     <rule>Start the prompt's five visible seconds after entrance. Hover/focus pauses its remaining timer; cancellation and authority/navigation teardown still clear it.</rule>
@@ -120,7 +135,7 @@
   <release-and-packaging>
     <rule>Keep release filenames consistent: webauthn-helper-PLATFORM-ARCH and webauthn-helper-desktop-PLATFORM-ARCH, with .exe on Windows.</rule>
     <rule>Record real build commit, feature set, byte sizes and SHA-256 hashes in downloads/builds.json. Comment-only edits do not justify stamping existing binaries with a new build provenance.</rule>
-    <rule>Bundle tracked source plus actual downloads contents. Compiled artifacts are permitted only under downloads in the delivered source ZIP.</rule>
+    <rule>Bundle tracked source with an explicit empty downloads directory. Keep existing local ignored artifacts untouched, but do not include them in the default source ZIP. Docker builds must depend only on tracked source and pinned, verified build-time upstream downloads, never local ignored assets.</rule>
     <rule>Exclude .git, Git history bundles, data/.data, web/dist, node_modules, target directories, caches, logs and generated test credentials.</rule>
     <rule>Source packaging must not require a prebuilt web/dist directory. Docker compiles the web interface and native components from their source.</rule>
     <rule>Retain third-party license notices and official pinned extension/vendor provenance. Do not fabricate unsupported platform binaries.</rule>

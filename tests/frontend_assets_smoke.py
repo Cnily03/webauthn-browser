@@ -18,7 +18,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='webauthn-browser-ui-assets-') as temp:
         env = dict(os.environ, AUTH_BROWSER_STORE=f'{temp}/store.json',
                    AUTH_BROWSER_PROXY_SOCKET=f'{temp}/run/proxy.sock')
-        process = subprocess.Popen([str(ROOT / 'target/release/webauthn-browser')], cwd=ROOT,
+        process = subprocess.Popen([os.environ.get('AUTH_BROWSER_TEST_BINARY', str(ROOT / 'target/release/webauthn-browser'))], cwd=ROOT,
                                    env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         client = urllib.request.build_opener(urllib.request.ProxyHandler({}),
             urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
@@ -42,8 +42,12 @@ def main():
             else:
                 raise RuntimeError('backend did not start')
             nonces = set()
-            for route in ('/', '/settings', '/settings/', '/downloads', '/downloads/', '/index.html'):
-                with send(route) as response:
+            for route in ('/', '/login', '/profile/default', '/profile/default/', '/settings', '/settings/', '/downloads', '/downloads/', '/index.html'):
+                try:
+                    response = send(route)
+                except urllib.error.HTTPError as error:
+                    raise AssertionError(f'SPA route {route} returned {error.code}') from error
+                with response:
                     html = response.read().decode()
                     assert '<title>WebAuthn Browser</title>' in html
                     assert response.headers['Content-Type'].startswith('text/html')
@@ -82,11 +86,11 @@ def main():
             with send('/api/security', {'scope': 'vnc', 'password': 'test-password'}, 'PUT') as response:
                 assert json.load(response)['ok']
             try:
-                send('/novnc/core/rfb.js')
+                send('/p/default/novnc/core/rfb.js')
                 raise AssertionError('noVNC route bypassed browser session')
             except urllib.error.HTTPError as error:
                 assert error.code == 401
-            print('PASS: built hashed assets served by Rust, six HTML routes get unique matching CSP nonces, secure headers and authenticated noVNC boundary')
+            print('PASS: built hashed assets served by Rust, nine HTML routes get unique matching CSP nonces, secure headers and authenticated noVNC boundary')
         finally:
             process.terminate()
             try:

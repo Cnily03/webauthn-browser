@@ -4,6 +4,7 @@ mod auth;
 mod authenticator;
 mod browser;
 mod http;
+mod profiles;
 mod relay;
 mod settings;
 mod storage;

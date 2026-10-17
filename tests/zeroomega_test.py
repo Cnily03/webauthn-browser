@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import runpy
 import tempfile
 import unittest
 from unittest import mock
@@ -52,6 +53,50 @@ class ZeroOmegaTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'SHA-256'):
                     module.install(lock, root, root / 'target', root / 'source')
             self.assertFalse((root / 'target').exists())
+
+    def test_build_command_without_cache_fetches_both_pinned_official_assets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); lock = self.fixture(root)
+            blobs = {lock[key]['url']: (root / lock[key]['filename']).read_bytes()
+                     for key in ('archive', 'source')}
+            # The CLI must succeed with no downloads directory or --cache input.
+            for key in ('archive', 'source'):
+                (root / lock[key]['filename']).unlink()
+            lock_path = root / 'release.json'; lock_path.write_text(json.dumps(lock))
+            def download(url, timeout):
+                self.assertEqual(timeout, 60)
+                self.assertTrue(url.startswith('https://github.com/zero-peak/ZeroOmega/'))
+                return io.BytesIO(blobs[url])
+            with mock.patch('sys.argv', ['install_zeroomega.py', '--lock', str(lock_path),
+                    '--target', str(root / 'installed'), '--source-target', str(root / 'licenses')]), \
+                    mock.patch.object(module.urllib.request, 'urlopen', side_effect=download) as fetch:
+                runpy.run_path(str(ROOT / 'runtime/install_zeroomega.py'), run_name='__main__')
+            self.assertEqual([call.args[0] for call in fetch.call_args_list],
+                             [lock['archive']['url'], lock['source']['url']])
+            self.assertEqual((root / 'licenses' / lock['source']['filename']).read_bytes(), b'fixture source')
+            self.assertEqual(json.loads((root / 'installed/manifest.json').read_text())['key'], lock['manifest_key'])
+            self.assertFalse((root / 'downloads').exists())
+
+    def test_uncached_download_hash_and_origin_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); lock = self.fixture(root)
+            with mock.patch.object(module.urllib.request, 'urlopen', return_value=io.BytesIO(b'corrupt')):
+                with self.assertRaisesRegex(ValueError, 'SHA-256'):
+                    module.install(lock, None, root / 'target', root / 'source')
+            self.assertFalse((root / 'target').exists())
+            lock['archive']['url'] = 'https://example.invalid/untrusted.zip'
+            with mock.patch.object(module.urllib.request, 'urlopen') as fetch:
+                with self.assertRaisesRegex(ValueError, 'Unexpected asset source'):
+                    module.install(lock, None, root / 'target', root / 'source')
+                fetch.assert_not_called()
+
+    def test_pinned_release_identity_is_unchanged(self):
+        lock = json.loads((ROOT / 'vendor/zeroomega/release.json').read_text())
+        self.assertEqual(lock['version'], '3.5.2')
+        self.assertEqual(lock['archive']['url'], 'https://github.com/zero-peak/ZeroOmega/releases/download/v3.5.2/chromium-release.zip')
+        self.assertEqual(lock['archive']['sha256'], '8e662c1ebc5b4ddb63e65a7c8664709c15cedf27c933c8ba8ff6d99b0c037ab0')
+        self.assertEqual(lock['source']['url'], 'https://github.com/zero-peak/ZeroOmega/archive/refs/tags/v3.5.2.zip')
+        self.assertEqual(lock['source']['sha256'], '72914e1cdd213b8ee2ca23955b3c5829cf22df6c3665288bb59ab9ccc1799379')
 
     def test_zip_traversal_and_mv2_rejected(self):
         for entries in ({'../escape': 'no'}, {'manifest.json': '{"manifest_version":2,"version":"3.5.2"}'}):

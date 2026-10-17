@@ -2,6 +2,19 @@
 
 ## User actions
 
+All operations below apply to one selected [profile](profiles.md). Browser data,
+supervisor state, displays, VNC and native capabilities are not shared between
+profiles. The active engine owner may resize that profile's display to the
+current outer viewport on page entry and manual reconnection, including shrinking
+either axis.
+Standby viewers cannot resize it; ordinary window resizing alone does not send
+continuous display changes.
+Sizing is best-effort. Invalid optional dimensions or a RandR sizing failure do
+not block the requested lifecycle operation. Inspection never changes geometry.
+Cancellation, expired ownership and real browser shutdown/startup failures remain
+hard failures; a sizing error never authorizes a second restart. A partially
+applied resize is not reported as restored or successfully verified.
+
 - Initial authorized outer-page entry sends `ensure`. A live browser stays alive.
   Existing normal-window tabs are moved into one window, which is maximized and
   focused. A confirmed empty live browser gets one fixed `about:blank` window
@@ -16,14 +29,15 @@
   issue the manual restart command. The outer page rebinds its VNC transport
   separately; it does not remount the native-mode controls merely to reconnect.
 
-The browser API requires authentication and CSRF protection. An authenticated
-GET `/api/browser/reconnect` obtains `operation_scope` (a public gateway-instance
+The browser API requires profile access, current engine ownership and CSRF
+protection. Browser endpoints below use the `/p/{canonical_name}` prefix. An
+authenticated GET `/p/{canonical_name}/api/browser/reconnect` obtains `operation_scope` (a public gateway-instance
 UUID) and `operation_sequence` (the exact next u64 value as a decimal string).
 POST to that path includes these two fields plus `action:"ensure"|"restart"` and
 `request_id:UUID`. Replies echo the correlation fields plus `window_count:1`,
 `engine_ready` and `restarted` (false for ensure, true for restart).
 
-One operation runs at a time. A monotonic global high-water value for this shared
+One operation runs at a time per profile. A monotonic high-water value for that
 browser prevents replay without storing unbounded lifetime history. The backend
 retains at most 128 recent terminal receipts plus the inflight operation; exact
 cached retries require all request fields and the authenticated owner to match.

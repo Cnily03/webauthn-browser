@@ -20,7 +20,16 @@ export const theme = createTheme({
     MuiSvgIcon: { styleOverrides: { root: { verticalAlign: 'middle' } } },
     MuiIconButton: { defaultProps: { size: 'small' } },
     MuiChip: { defaultProps: { size: 'small' } },
-    MuiAccordion: { defaultProps: { elevation: 1 } },
+    MuiAccordion: {
+      defaultProps: { elevation: 0, disableGutters: true, slotProps: { transition: { timeout: 180 } } },
+      styleOverrides: { root: { margin: 0, boxShadow: 'none', '&.Mui-expanded': { margin: 0 } } },
+    },
+    MuiAccordionSummary: {
+      styleOverrides: {
+        root: { minHeight: 48, '&.Mui-expanded': { minHeight: 48 } },
+        content: { margin: '12px 0', '&.Mui-expanded': { margin: '12px 0' } },
+      },
+    },
     MuiDialog: { styleOverrides: { paper: ({ theme }) => ({ border: `1px solid ${theme.palette.divider}`, boxShadow: 'none' }) } },
     MuiDialogTitle: { styleOverrides: { root: { padding: '24px 24px 12px' } } },
     MuiDialogActions: { styleOverrides: { root: { padding: '16px 24px 24px', gap: 8 } } },

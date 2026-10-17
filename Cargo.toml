@@ -5,6 +5,7 @@ edition = "2021"
 license = "GPL-3.0-or-later"
 
 [dependencies]
+tower = { version = "0.5", features = ["util"] }
 libc = "0.2"
 fido-report-relay = { path = "src/fido-relay" }
 anyhow = "1"
@@ -31,4 +32,3 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 webauthn-helper = { path = "helper" }
-tower = { version = "0.5", features = ["util"] }

@@ -1,7 +1,7 @@
 //! Read-only downloads rooted in an opened directory. Symlinks and nested paths are never followed.
 use axum::{
     body::{Body, Bytes},
-    extract::OriginalUri,
+    extract::{OriginalUri, State},
     http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -304,10 +304,10 @@ pub async fn list() -> Response {
             .into_response(),
     }
 }
-pub async fn manifest() -> Json<Value> {
+pub async fn manifest(State(app): State<crate::app::App>) -> Json<Value> {
     let entries = catalog().await;
     Json(json!({
-        "downloads": entries.iter().map(|e| json!({"filename":e.filename,"platform":e.platform,"mode":e.mode,"arch":e.arch,"size":e.bytes.len(),"sha256":e.hash,"url":format!("/download/{}",e.filename)})).collect::<Vec<_>>(),
+        "downloads": entries.iter().map(|e| json!({"filename":e.filename,"platform":e.platform,"mode":e.mode,"arch":e.arch,"size":e.bytes.len(),"sha256":e.hash,"url":format!("{}/download/{}",if app.profile_scope{format!("/p/{}",app.profile_name.as_deref().unwrap_or("default"))}else{String::new()},e.filename)})).collect::<Vec<_>>(),
         "unavailable":TARGETS.iter().filter(|(filename,_,_,_)| !entries.iter().any(|e| e.filename == *filename)).map(|(_,platform,mode,arch)| json!({"platform":platform,"mode":mode,"arch":arch,"reason":"此版本未提供已构建的可执行文件"})).collect::<Vec<_>>()
     }))
 }
@@ -648,7 +648,7 @@ mod tests {
     // Route-level regression for the shared React shell, metadata and byte stream.
 
     #[tokio::test]
-    async fn downloads_shell_is_public_but_metadata_and_files_require_vnc_auth() {
+    async fn downloads_shell_metadata_and_files_are_public_but_legacy_routes_stay_protected() {
         let (app, dir) = app();
         let list = call(&app, "GET", "/api/downloads", Value::Null, "", "", None).await;
         assert_eq!(list.status(), StatusCode::OK);
@@ -659,9 +659,10 @@ mod tests {
         assert!(list["files"].is_array());
 
         let routes = [
-            "/api/downloads",
-            "/downloads/file.bin",
-            "/download/file.bin",
+            ("/api/downloads", StatusCode::OK),
+            ("/downloads/file.bin", StatusCode::NOT_FOUND),
+            ("/download/file.bin", StatusCode::UNAUTHORIZED),
+            ("/api/helper/downloads", StatusCode::UNAUTHORIZED),
         ];
         {
             let mut inner = app.inner.lock().await;
@@ -678,12 +679,12 @@ mod tests {
             }
         }
         for cookies in ["", "ab_settings=settings"] {
-            for route in routes {
+            for (route, expected) in routes {
                 assert_eq!(
                     call(&app, "GET", route, Value::Null, cookies, "", None)
                         .await
                         .status(),
-                    StatusCode::UNAUTHORIZED,
+                    expected,
                     "{route}"
                 );
             }
@@ -735,7 +736,7 @@ mod tests {
             )
             .await
             .status(),
-            StatusCode::UNAUTHORIZED
+            StatusCode::OK
         );
         std::fs::remove_dir_all(dir).unwrap();
     }

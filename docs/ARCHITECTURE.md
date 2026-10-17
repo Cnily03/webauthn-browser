@@ -21,6 +21,35 @@ Unit tests live in final `#[cfg(test)] mod tests` blocks beside implementation;
 test-only shared support contains fixtures, while actual subprocess/integration
 fixtures remain under `tests/`. Module moves do not change stored data or wire APIs.
 
+## Profile scope and shared state
+
+The `profiles` domain resolves case-insensitive public names to immutable internal
+IDs and composes a separate browser state for each enabled profile. Browser APIs
+are scoped under `/p/{canonical_name}`; public pages use `/profile/{name}`. Each profile has
+its own broker, Chromium process, X display, VNC transport, clipboard, BLE bridge
+and native relay generations. The authenticator store and settings administration
+are global. A profile boundary must not be implemented by changing a process-wide
+"current profile" pointer or reusing another browser's private socket.
+
+Remembered profile access and live engine ownership are separate authorities.
+Profile-scoped HttpOnly credentials have a rolling 30-day inactivity limit and
+revocable hashed records in the shared store. A viewer receives only transient
+engine capabilities; the first eligible viewer acquires ownership atomically.
+Real user activity extends its configurable idle timeout, while status polling
+and connection keepalives do not. Requests and transports recheck profile, owner
+and generation across asynchronous boundaries. Owner expiry and revocation
+invalidate outstanding work before a successor can authorize new requests.
+
+The default browser retains its existing files. Additional profiles use immutable
+ID-based paths; changing a public name does not move data. Disabling multi-profile
+mode forces default availability without mutating saved enable flags. See
+[profiles](profiles.md) for routing, persistence and user-facing behavior.
+
+Unless explicitly described as a global settings/public route, browser endpoint
+paths in the sections below are relative to `/p/{canonical_name}`. For example,
+the request stream is `/p/{canonical_name}/api/requests/events`. Legacy unscoped
+browser routes must not provide an alternative authorization path.
+
 ## Browser request boundary
 
 The packaged MV3 extension uses `chrome.webAuthenticationProxy`, available on
@@ -123,8 +152,10 @@ Actual Chromium/phone interoperation remains unverified until hardware E2E.
 Unit/mock tests and executable compilation alone cannot establish success.
 
 `/downloads` lists every readable top-level regular file in the configured
-directory, with escaped labels and byte-encoded URLs. Both `/downloads/{filename}`
-and the legacy `/download/{filename}` stream attachments through the VNC guard.
+directory, with escaped labels and byte-encoded URLs. The global `/api/downloads`
+listing and `/downloads/{filename}` attachments are public without profile or
+password requirements. The legacy `/download/{filename}` and helper manifest
+routes retain their VNC guard.
 A directory-bound `openat` with `NOFOLLOW` prevents symlink/path escape; no folder
 recursion occurs. Changes are visible without restart. Compose mounts
 `./downloads:/downloads:ro`. The separate legacy JSON manifest still validates

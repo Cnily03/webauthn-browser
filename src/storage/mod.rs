@@ -2,3 +2,5 @@
 
 pub(crate) mod restore;
 pub(crate) mod store;
+
+pub(crate) mod profiles;
