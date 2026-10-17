@@ -1,4 +1,4 @@
-import { StrictMode } from 'react';
+import { StrictMode, useState } from 'react';
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -651,5 +651,29 @@ describe('global notice transition lifetime', () => {
     await advance(2999); expect(screen.getByText('浏览器已重启，验证引擎连接中。')).toBeVisible();
     await advance(1); expect(screen.getByText('浏览器已重启，验证引擎连接中。')).toBeInTheDocument();
     await advance(1000); expect(screen.queryByText('浏览器已重启，验证引擎连接中。')).toBeNull();
+  });
+});
+
+describe('profile clipboard ownership generation', () => {
+  it('replaces only the clipboard transport when the same viewer receives a new generation', async () => {
+    const profile = {
+      name: 'default', enabled: true, effective_enabled: true, password_enabled: true, idle_timeout_seconds: 180,
+      viewer: {viewer_id: 'same-viewer', viewer_token: 'test-viewer-token', owner: true, generation: 1, expired: false, idle_timeout_seconds: 180},
+      onDisconnected: vi.fn(), onLocked: vi.fn(),
+    };
+    let replace!: (value: typeof profile) => void;
+    function Harness() { const [value, setValue] = useState(profile); replace = setValue; return <App profile={value} />; }
+    renderMaterial(<Harness />);
+    await waitFor(() => expect(clients).toHaveLength(1));
+    act(() => clients[0].emit('connect'));
+    const clipboardSockets = () => HelperSocket.instances.filter(socket => String(socket.url).includes('/api/clipboard/ws'));
+    await waitFor(() => expect(clipboardSockets()).toHaveLength(1));
+    const original = clipboardSockets()[0];
+    act(() => replace({...profile, viewer: {...profile.viewer, generation: 2}}));
+    await waitFor(() => expect(clipboardSockets()).toHaveLength(2));
+    expect(original.close).toHaveBeenCalledTimes(1);
+    expect(clients).toHaveLength(1);
+    expect(clients[0].disconnect).not.toHaveBeenCalled();
+    expect(calls.filter(call => call.path === '/api/browser/reconnect' && call.method === 'POST' && (call.body as {action?: string})?.action === 'restart')).toHaveLength(0);
   });
 });

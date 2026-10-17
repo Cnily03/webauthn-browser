@@ -1,7 +1,13 @@
+import { useState, type ReactElement } from 'react';
 import { act, fireEvent, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ClipboardSync } from './ClipboardSync';
 import { renderMaterial } from './test-render';
+import { ApiError, browserTransportUrl } from './api';
+const profile = vi.hoisted(() => ({name: null as string | null, headers: {} as Record<string, string>}));
+vi.mock('./profiles', () => ({browserProfileName: () => profile.name, profileViewerHeaders: () => profile.headers}));
+vi.mock('./api', async importOriginal => ({...await importOriginal<typeof import('./api')>(), browserTransportUrl: vi.fn()}));
+beforeEach(() => { profile.name = null; profile.headers = {}; vi.mocked(browserTransportUrl).mockReset(); });
 class Socket {
   static OPEN = 1;
   static instances: Socket[] = [];
@@ -19,8 +25,10 @@ function setup() {
   vi.stubGlobal('WebSocket', Socket); vi.stubGlobal('isSecureContext', true);
   const readText = vi.fn().mockRejectedValue(new DOMException('A fresh gesture is required', 'NotAllowedError'));
   Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { readText, writeText: vi.fn().mockResolvedValue(undefined) } });
-  const view = renderMaterial(<ClipboardSync connected copyAgain={vi.fn()} />);
-  const socket = Socket.instances[0]; return { ...view, socket, readText };
+  let replace!: (element: ReactElement) => void;
+  function Harness() { const [element, setElement] = useState(<ClipboardSync connected copyAgain={vi.fn()} />); replace = setElement; return element; }
+  const view = renderMaterial(<Harness />);
+  const socket = Socket.instances[0]; return { ...view, rerender: (element: ReactElement) => act(() => replace(element)), socket, readText };
 }
 describe('MUI clipboard permission and lifecycle', () => {
   it('lets the browser handle the initial read without showing a permission banner', async () => {
@@ -115,4 +123,118 @@ describe('MUI clipboard permission and lifecycle', () => {
     const { socket, readText } = setup(); act(() => socket.onclose?.());
     expect(screen.getByRole('img', {name: '剪贴板已断开'})).toBeVisible(); expect(screen.queryByRole('alert')).toBeNull(); expect(readText).not.toHaveBeenCalled();
   });
+  it('recovers a clipboard-only disconnect after hours without reloading or reading in the background', async () => {
+    vi.useFakeTimers();
+    const {socket, readText} = setup();
+    act(() => socket.onopen?.());
+    await act(async () => vi.advanceTimersByTime(6 * 60 * 60 * 1000));
+    expect(Socket.instances).toHaveLength(1);
+    const oldMessage = socket.onmessage;
+    act(() => socket.onclose?.());
+    await act(async () => vi.advanceTimersByTime(500));
+    expect(Socket.instances).toHaveLength(2);
+    const replacement = Socket.instances[1];
+    await act(async () => { replacement.onopen?.(); replacement.receive({type: 'copy', id: 'new', text: 'new copy'}); });
+    expect(replacement.send).toHaveBeenCalledWith(JSON.stringify({type: 'copy_result', id: 'new'}));
+    act(() => oldMessage?.({data: JSON.stringify({type: 'read', id: 'stale'})}));
+    expect(readText).not.toHaveBeenCalled();
+    expect(screen.queryByRole('img', {name: '剪贴板已断开'})).not.toBeInTheDocument();
+  });
+  it('drops a late read after reconnect and handles a fresh paste independently', async () => {
+    vi.useFakeTimers();
+    const {socket, readText} = setup();
+    let finish!: (value: string) => void;
+    readText.mockReturnValueOnce(new Promise<string>(resolve => { finish = resolve; }));
+    act(() => { socket.onopen?.(); socket.receive({type: 'read', id: 'old'}); socket.onclose?.(); });
+    await act(async () => vi.advanceTimersByTime(500));
+    readText.mockResolvedValue('fresh');
+    const replacement = Socket.instances[1];
+    await act(async () => { replacement.onopen?.(); replacement.receive({type: 'read', id: 'fresh'}); finish('stale'); });
+    expect(socket.send).not.toHaveBeenCalled();
+    expect(replacement.send).toHaveBeenCalledExactlyOnceWith(JSON.stringify({type: 'read_result', id: 'fresh', text: 'fresh'}));
+  });
+  it.each(['unmount', 'pagehide', 'ownership loss'] as const)('cancels scheduled recovery on %s', async reason => {
+    vi.useFakeTimers();
+    const {socket, unmount, rerender} = setup();
+    act(() => socket.onclose?.());
+    act(() => {
+      if (reason === 'unmount') unmount();
+      else if (reason === 'pagehide') window.dispatchEvent(new Event('pagehide'));
+      else rerender(<ClipboardSync connected={false} copyAgain={vi.fn()} />);
+    });
+    await act(async () => vi.advanceTimersByTime(60000));
+    expect(Socket.instances).toHaveLength(1);
+  });
+  it('times out a stuck opening socket and backs off repeated failures', async () => {
+    vi.useFakeTimers();
+    const {socket} = setup();
+    await act(async () => vi.advanceTimersByTime(1000));
+    expect(socket.close).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTime(500));
+    expect(Socket.instances).toHaveLength(2);
+    act(() => Socket.instances[1].onerror?.());
+    await act(async () => vi.advanceTimersByTime(999));
+    expect(Socket.instances).toHaveLength(2);
+    await act(async () => vi.advanceTimersByTime(1));
+    expect(Socket.instances).toHaveLength(3);
+  });
+  it('keeps backing off when a bridge repeatedly closes immediately after opening', async () => {
+    vi.useFakeTimers(); const {socket} = setup();
+    act(() => { socket.onopen?.(); socket.onclose?.(); });
+    await act(async () => vi.advanceTimersByTime(500));
+    act(() => { Socket.instances[1].onopen?.(); Socket.instances[1].onclose?.(); });
+    await act(async () => vi.advanceTimersByTime(500));
+    expect(Socket.instances).toHaveLength(2);
+    await act(async () => vi.advanceTimersByTime(500));
+    expect(Socket.instances).toHaveLength(3);
+  });
+  it('requests a fresh single-use profile ticket on every reconnect', async () => {
+    vi.useFakeTimers(); profile.name = 'work'; profile.headers = {'X-Viewer-Token': 'owner', 'X-Owner-Generation': '1'};
+    vi.mocked(browserTransportUrl).mockResolvedValueOnce(new URL('ws://localhost/p/work/api/clipboard/ws?ticket=one'))
+      .mockResolvedValueOnce(new URL('ws://localhost/p/work/api/clipboard/ws?ticket=two'));
+    setup(); await act(async () => {});
+    act(() => { Socket.instances[0].onopen?.(); Socket.instances[0].onclose?.(); });
+    await act(async () => vi.advanceTimersByTime(500));
+    expect(browserTransportUrl).toHaveBeenCalledTimes(2);
+    expect(Socket.instances[1].url.searchParams.get('ticket')).toBe('two');
+  });
+  it.each([401, 403])('does not retry revoked admission (%s)', async status => {
+    vi.useFakeTimers(); profile.name = 'work';
+    vi.mocked(browserTransportUrl).mockRejectedValue(new ApiError('revoked', status));
+    setup(); await act(async () => {});
+    await act(async () => vi.advanceTimersByTime(60000));
+    expect(browserTransportUrl).toHaveBeenCalledTimes(1); expect(Socket.instances).toHaveLength(0);
+  });
+  it('does not adopt a changed viewer during a queued reconnect', async () => {
+    vi.useFakeTimers();
+    const {socket} = setup(); act(() => socket.onclose?.());
+    profile.headers = {'X-Viewer-Token': 'successor', 'X-Owner-Generation': '2'};
+    await act(async () => vi.advanceTimersByTime(500));
+    expect(Socket.instances).toHaveLength(1);
+  });
+  it('resets the clipboard alone for a new ownership generation', async () => {
+    const {socket, rerender, readText} = setup();
+    const staleMessage = socket.onmessage;
+    profile.headers = {'X-Viewer-Token': 'successor', 'X-Owner-Generation': '2'};
+    rerender(<ClipboardSync connected sessionKey="viewer:2" copyAgain={vi.fn()} />);
+    expect(socket.close).toHaveBeenCalledTimes(1); expect(Socket.instances).toHaveLength(2);
+    act(() => staleMessage?.({data: JSON.stringify({type: 'read', id: 'stale'})}));
+    expect(readText).not.toHaveBeenCalled();
+  });
+  it('blocks an old fallback click immediately when viewer identity changes', async () => {
+    const {socket, readText} = setup();
+    await act(async () => socket.receive({type: 'read', id: 'old'}));
+    const fallback = screen.getByRole('button', {name: '粘贴剪贴板内容'});
+    profile.headers = {'X-Viewer-Token': 'successor', 'X-Owner-Generation': '2'};
+    fireEvent.click(fallback);
+    expect(readText).toHaveBeenCalledTimes(1);
+  });
+  it('ignores a ticket response that arrives after teardown', async () => {
+    profile.name = 'work'; let finish!: (url: URL) => void;
+    vi.mocked(browserTransportUrl).mockReturnValue(new Promise<URL>(resolve => { finish = resolve; }));
+    const {unmount} = setup(); unmount();
+    await act(async () => finish(new URL('ws://localhost/?ticket=stale')));
+    expect(Socket.instances).toHaveLength(0);
+  });
+
 });

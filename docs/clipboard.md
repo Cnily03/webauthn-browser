@@ -30,6 +30,32 @@ and [W3C Clipboard APIs](https://www.w3.org/TR/clipboard-apis/).
 The built-in noVNC text channel is disabled with x11vnc `-nosel`, avoiding its
 internal cache and older Latin-1 protocol path; see the [noVNC API](https://novnc.com/noVNC/docs/API.html).
 
+## Recovery and browser permissions
+
+Remote Copy writes the current text to the local clipboard immediately when the
+browser permits it. Remote Paste requests the local clipboard only for that paste.
+The browser handles its own permission prompt. If it requires a new gesture after
+rejecting a read, click the small paste icon; denied writes offer the copy icon to
+copy the current remote selection again. No clipboard history or background reads
+are used to work around browser permissions.
+
+The clipboard has a separate WebSocket from the remote desktop. If that socket
+closes while the desktop remains connected, it now reconnects automatically with
+500 ms exponential backoff capped at 10 seconds. A successful handshake alone does
+not reset backoff: the connection must survive 30 seconds. An unopened socket is
+bounded to one second and ticket admission to ten seconds. Every scoped retry
+obtains a fresh single-use ticket. Clipboard recovery does not restart Chromium,
+reload tabs or reconnect VNC. A copy/paste interrupted by failure must be repeated;
+its text or pending permission request is never replayed after recovery.
+
+The relay sends transport-only Ping frames every 15 seconds. A missing matching
+Pong at the next interval closes the private bridge connection, releasing a dead
+controller instead of leaving reconnects permanently blocked. These frames do not
+renew the profile's user-idle deadline. Changing owner generation replaces only
+the clipboard controller; changed viewer identity, logout, pagehide and unmount
+block stale callbacks and cancel queued reconnects. Explicit ticket authentication
+or authorization failure stops retries until the owning session is reestablished.
+
 ## End-to-end checks on a Docker-capable host
 
 1. Run `docker compose up --build -d`. Open the browser page on localhost or
@@ -56,7 +82,15 @@ internal cache and older Latin-1 protocol path; see the [noVNC API](https://novn
 8. Check Chrome, Firefox and Safari over HTTPS. Plain HTTP on a remote IP must
    show an unavailable state without reusing text. Record each browser's own
    permission and gesture behavior separately.
-9. Simulate disconnect, requester exit, unsupported UTF8 targets, large INCR,
+9. Leave the page connected and inactive beyond the reverse proxy's usual idle
+   timeout, then copy/paste in both directions. Drop only the clipboard socket
+   while leaving VNC alive; it must recover without a page reload or tab restart.
+   Blackhole a socket and verify the heartbeat frees the old controller, then
+   restore connectivity. Pending reads from before recovery must not replay.
+10. Change owner generation, switch profiles, lock/logout and restore via
+   Back/Forward while admission, a retry or browser permission is pending.
+   Old callbacks and fallback clicks must not touch the successor's clipboard.
+11. Simulate disconnect, requester exit, unsupported UTF8 targets, large INCR,
    overflow and bridge restart. Failure must leave an empty/failed conversion,
    never replay a previously successful value.
 

@@ -19,6 +19,7 @@ const MAX_TEXT_BYTES: usize = 1024 * 1024;
 // JSON can expand each control byte into a six-byte Unicode escape.
 const MAX_WIRE_BYTES: usize = 6 * MAX_TEXT_BYTES + 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+const HEARTBEAT_PERIOD: Duration = Duration::from_secs(15);
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -212,8 +213,8 @@ async fn until_revoked<F: Future<Output = ()>>(
 
 async fn relay<R, S, I, E>(
     runtime: R,
-    mut sink: S,
-    mut stream: I,
+    sink: S,
+    stream: I,
     app: &App,
     headers: &HeaderMap,
     epoch: u64,
@@ -222,21 +223,56 @@ async fn relay<R, S, I, E>(
     S: Sink<Message> + Unpin,
     I: Stream<Item = Result<Message, E>> + Unpin,
 {
+    relay_with_heartbeat(runtime, sink, stream, app, headers, epoch, HEARTBEAT_PERIOD).await;
+}
+
+async fn relay_with_heartbeat<R, S, I, E>(
+    runtime: R,
+    mut sink: S,
+    mut stream: I,
+    app: &App,
+    headers: &HeaderMap,
+    epoch: u64,
+    heartbeat_period: Duration,
+) where
+    R: AsyncRead + AsyncWrite + Unpin,
+    S: Sink<Message> + Unpin,
+    I: Stream<Item = Result<Message, E>> + Unpin,
+{
     let (reader, mut writer) = tokio::io::split(runtime);
     let mut frames = Frames::new(BufReader::new(reader), MAX_WIRE_BYTES);
+    let (pong, acknowledged) = tokio::sync::watch::channel(0_u64);
     let from_runtime = async {
+        // A silent dead browser otherwise holds the runtime's sole private
+        // controller indefinitely. Control frames carry no clipboard text and
+        // never count as viewer activity or extend its authorization lifetime.
+        let mut heartbeat = tokio::time::interval_at(
+            tokio::time::Instant::now() + heartbeat_period,
+            heartbeat_period,
+        );
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut sequence = 0_u64;
         loop {
-            let Ok(Some(bytes)) = frames.next().await else {
-                break;
-            };
-            let Some(text) = runtime_message(&bytes) else {
-                break;
+            let message = tokio::select! {
+                biased;
+                _ = heartbeat.tick() => {
+                    if *acknowledged.borrow() != sequence {
+                        break;
+                    }
+                    sequence = sequence.wrapping_add(1);
+                    Message::Ping(sequence.to_be_bytes().to_vec())
+                },
+                frame = frames.next() => {
+                    let Ok(Some(bytes)) = frame else { break; };
+                    let Some(text) = runtime_message(&bytes) else { break; };
+                    Message::Text(text)
+                },
             };
             if !still_authorized(app, headers, epoch).await {
                 break;
             }
             if !matches!(
-                tokio::time::timeout(IO_TIMEOUT, sink.send(Message::Text(text))).await,
+                tokio::time::timeout(IO_TIMEOUT, sink.send(message)).await,
                 Ok(Ok(()))
             ) {
                 break;
@@ -262,8 +298,13 @@ async fn relay<R, S, I, E>(
                         break;
                     }
                 }
+                Some(Ok(Message::Pong(payload))) => {
+                    if let Ok(bytes) = <[u8; 8]>::try_from(payload.as_slice()) {
+                        pong.send_replace(u64::from_be_bytes(bytes));
+                    }
+                }
                 // axum/tungstenite responds to Ping automatically.
-                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                Some(Ok(Message::Ping(_))) => {}
                 // Binary frames, protocol errors and closure terminate the
                 // private connection; runtime cancels its pending request.
                 _ => break,
@@ -607,6 +648,123 @@ mod tests {
             .unwrap();
         input.send(Message::Close(None)).unwrap();
         tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(remote.read(&mut [0]).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_releases_silent_and_stale_peers_without_private_writes() {
+        for stale_pong in [false, true] {
+            let fixture = Fixture::new();
+            let (local, mut remote) = tokio::io::duplex(4096);
+            let (output, mut received) = tokio::sync::mpsc::unbounded_channel();
+            let sink = Box::pin(futures_util::sink::unfold(
+                output,
+                |output, message| async move {
+                    output.send(message).map_err(|_| ())?;
+                    Ok::<_, ()>(output)
+                },
+            ));
+            let stream = if stale_pong {
+                futures_util::stream::iter(vec![Ok::<_, ()>(Message::Pong(
+                    0_u64.to_be_bytes().to_vec(),
+                ))])
+            } else {
+                futures_util::stream::iter(Vec::new())
+            }
+            .chain(futures_util::stream::pending());
+            let app = fixture.app.clone();
+            let headers = fixture.headers.clone();
+            let permit = app.stream_slots.clone().try_acquire_owned().unwrap();
+            let task = tokio::spawn(async move {
+                let _permit = permit;
+                relay_with_heartbeat(
+                    local,
+                    sink,
+                    stream,
+                    &app,
+                    &headers,
+                    0,
+                    Duration::from_millis(30),
+                )
+                .await;
+            });
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_secs(2), received.recv())
+                    .await
+                    .unwrap(),
+                Some(Message::Ping(_))
+            ));
+            tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(fixture.app.stream_slots.available_permits(), 2);
+            // Ping/Pong never reaches the clipboard runtime or carries text.
+            assert_eq!(remote.read(&mut [0]).await.unwrap(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn matching_heartbeat_keeps_idle_transport_live_without_extending_session() {
+        let fixture = Fixture::new();
+        let expires = fixture.app.inner.lock().await.sessions["session"].expires;
+        let (local, mut remote) = tokio::io::duplex(4096);
+        let (output, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let sink = Box::pin(futures_util::sink::unfold(
+            output,
+            |output, message| async move {
+                output.send(message).map_err(|_| ())?;
+                Ok::<_, ()>(output)
+            },
+        ));
+        let (input, incoming) = tokio::sync::mpsc::unbounded_channel();
+        let stream = Box::pin(futures_util::stream::unfold(
+            incoming,
+            |mut incoming| async move {
+                incoming
+                    .recv()
+                    .await
+                    .map(|message| (Ok::<_, ()>(message), incoming))
+            },
+        ));
+        let app = fixture.app.clone();
+        let headers = fixture.headers.clone();
+        let task = tokio::spawn(async move {
+            relay_with_heartbeat(
+                local,
+                sink,
+                stream,
+                &app,
+                &headers,
+                0,
+                Duration::from_millis(50),
+            )
+            .await;
+        });
+        // Heartbeats must not discard a partially read private JSON frame.
+        remote.write_all(b"{\"type\":\"read\",").await.unwrap();
+        for expected in 1_u64..=3 {
+            let Some(Message::Ping(payload)) =
+                tokio::time::timeout(Duration::from_secs(2), received.recv())
+                    .await
+                    .unwrap()
+            else {
+                panic!("expected heartbeat");
+            };
+            assert_eq!(payload, expected.to_be_bytes());
+            input.send(Message::Pong(payload)).unwrap();
+        }
+        remote.write_all(b"\"id\":\"fresh\"}\n").await.unwrap();
+        assert!(matches!(received.recv().await, Some(Message::Text(_))));
+        assert_eq!(
+            fixture.app.inner.lock().await.sessions["session"].expires,
+            expires
+        );
+        input.send(Message::Close(None)).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
             .await
             .unwrap()
             .unwrap();

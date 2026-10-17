@@ -102,6 +102,31 @@ unscoped browser-success flow is intentionally rejected. A prerequisite skip in
 this environment is not a successful end-to-end SSE or clipboard check; scoped
 owner/standby, CSRF, snapshot and release behavior is also tested in-process.
 
+## Clipboard connection recovery
+
+```sh
+pnpm --dir web test src/ClipboardSync.test.tsx src/clipboard.test.ts
+pnpm --dir web run typecheck
+pnpm --dir web run build
+cargo test --locked --bin webauthn-browser relay::clipboard
+python3 -m unittest discover -s tests -p 'clipboard_bridge_test.py'
+```
+
+The frontend regression reproduces a six-hour live desktop whose clipboard-only
+socket closes: the previous implementation never opened a replacement socket.
+Fake-timer/jsdom checks cover reconnect backoff, one-second unopened deadlines,
+fresh profile tickets, stopped retries after revoked admission, ownership-only
+resets, teardown, stale ticket/permission/event results, and identity changes
+before an old fallback click. Existing Clipboard API tests cover fresh on-demand
+reads, immediate writes, gesture fallback, bounds and no retained payloads.
+
+Rust relay tests cover transport-only heartbeat, matching/missing Pong and
+revocation; Python bridge fixtures cover selection/request cancellation and
+controller ownership. These synthetic checks do not establish real X11,
+reverse-proxy or browser-permission behavior. Complete the scoped, long-lived,
+Chrome/Firefox/Safari acceptance in [docs/clipboard.md](docs/clipboard.md) on a
+Docker/browser-capable host before claiming end-to-end clipboard acceptance.
+
 ## Profile isolation and concurrent ownership
 
 ```sh
