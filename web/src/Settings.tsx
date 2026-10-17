@@ -266,7 +266,7 @@ export default function Settings({ status, refreshStatus, onUnauthorized, notify
     finally { confirmBusy.current = false; if (mounted.current) setConfirming(false); }
   };
   return <Box className="settings-page">
-    <Box component="header" className="settings-heading"><Typography variant="overline" color="text.secondary">浏览器与验证器</Typography><Typography variant="h1">设置</Typography></Box>
+    <Box component="header" className="settings-heading"><Typography variant="overline" color="text.secondary">浏览器与验证器</Typography><Typography variant="h1">设 置</Typography></Box>
     <Box className="settings-layout" sx={{ display: { xs: 'block', md: 'grid' }, gridTemplateColumns: '176px minmax(0, 1fr)', alignItems: 'start', gap: 3 }}>
       <Paper component="nav" className="section-nav" variant="outlined" aria-label="设置分类"><List disablePadding>{[['security', '安全设置'], ['browser', '浏览器设置'], ['authenticator', '验证器管理']].map(([id, label]) => <ListItemButton key={id} component="a" href={`#${id}`} selected={section === id} aria-current={section === id ? 'page' : undefined} onClick={event => { event.preventDefault(); acceptedNavigation.navigate(`#${id}`); }}><ListItemText primary={label} /></ListItemButton>)}</List></Paper>
       <Box className="settings-sections">

@@ -289,7 +289,7 @@ export function BrowserControls({hidden = false, authConnection, connected, reco
     <Stack spacing={1.5} useFlexGap>
       <Stack className="browser-control-toolbar" direction="row" sx={{alignItems: 'center', gap: 1, height: 32, minHeight: 32, flexWrap: 'nowrap'}}>
       <Stack direction="row" sx={{alignItems: 'center', flexShrink: 0, height: 32, '& .MuiIconButton-root': {width: 32, height: 32}}}>
-        <Tooltip title="移动控制栏（方向键移动，Shift 微调）"><IconButton size="small" aria-label="移动控制栏" aria-description="使用方向键移动，按住 Shift 微调。" sx={{cursor: 'move', touchAction: 'none'}} {...placement.handleProps}><DragIndicatorIcon fontSize="small" /></IconButton></Tooltip>
+        <Tooltip title="移动控制栏"><IconButton size="small" aria-label="移动控制栏" aria-description="使用方向键移动，按住 Shift 微调。" sx={{cursor: 'move', touchAction: 'none'}} {...placement.handleProps}><DragIndicatorIcon fontSize="small" /></IconButton></Tooltip>
         <Tooltip title={collapsed ? '展开控制栏' : '收起控制栏'}><IconButton size="small" aria-label={collapsed ? '展开控制栏' : '收起控制栏'} aria-expanded={!collapsed} aria-controls="browser-control-content browser-control-secondary-content" onClick={() => setCollapsed(value => !value)}>{collapsed ? <KeyboardDoubleArrowRightIcon fontSize="small" /> : <KeyboardDoubleArrowLeftIcon fontSize="small" />}</IconButton></Tooltip>
       </Stack>
       <Stack id="browser-control-content" hidden={collapsed} sx={{display: collapsed ? 'none' : 'flex', height: 32, minWidth: 0, flex: '1 1 auto'}}>

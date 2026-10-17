@@ -47,7 +47,7 @@ export default function Downloads() {
     return () => { active = false; controller.abort(); };
   }, [version]);
   return <Box className="downloads-page">
-    <Typography variant="h1" sx={{mb: 3}}>下载</Typography>
+    <Typography variant="h1" sx={{mb: 3}}>下 载</Typography>
     {loading ? <Stack role="status" aria-label="正在读取下载列表" direction="row" spacing={2} sx={{alignItems: 'center', py: 4}}><CircularProgress size={22} /><Typography variant="body2">正在读取…</Typography></Stack>
       : error ? <Alert severity="error" action={<Button onClick={() => setVersion(value => value + 1)}>重试</Button>}>{error}</Alert>
       : <TableContainer component={Paper} variant="outlined"><Table size="small" aria-label="下载文件">
