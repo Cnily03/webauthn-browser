@@ -2,69 +2,171 @@ use std::{
     io::Write,
     process::{Command, Stdio},
 };
-fn run(args: &[&str], input: &str) -> (std::process::Output, std::path::PathBuf) {
+#[path = "support/cli_startup.rs"]
+mod cli_startup;
+use cli_startup::StartupOutput;
+
+const PHYSICAL_USB_SUPPORTED: bool = cfg!(any(target_os = "linux", target_os = "windows"));
+
+fn startup_output(text: &str) -> StartupOutput {
+    let mut startup = StartupOutput::default();
+    for line in text.lines() {
+        startup.observe(line, PHYSICAL_USB_SUPPORTED).unwrap();
+    }
+    assert!(
+        startup.listener.is_some(),
+        "Missing listener announcement: {text}"
+    );
+    startup
+}
+
+// Clap exits before the asynchronous runtime logger is installed. Runtime
+// command tests must use InteractiveCli and acknowledge output before exit.
+fn run_arguments(args: &[&str]) -> (std::process::Output, std::path::PathBuf) {
     let config = std::env::temp_dir().join(format!(
         "helper-cli-{}-{}",
         std::process::id(),
         rand::random::<u64>()
     ));
     std::fs::create_dir_all(&config).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_webauthn-helper"))
+    let out = Command::new(env!("CARGO_BIN_EXE_webauthn-helper"))
         .args(args)
         .env("XDG_CONFIG_HOME", &config)
         .env("APPDATA", &config)
         .env("HOME", &config)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    (out, config)
+}
+
+// Logging is deliberately best-effort at process exit: waiting for its worker
+// could hang on a blocked terminal. Observe readiness before sending EOF so
+// these tests exercise shutdown without racing the startup log queue.
+fn ready_then_eof(args: &[&str], config: &std::path::Path) -> std::process::Output {
+    use std::io::BufRead;
+    use std::time::{Duration, Instant};
+    let mut child = Command::new(env!("CARGO_BIN_EXE_webauthn-helper"))
+        .args(args)
+        .env("XDG_CONFIG_HOME", config)
+        .env("APPDATA", config)
+        .env("HOME", config)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.as_bytes())
-        .unwrap();
-    (child.wait_with_output().unwrap(), config)
+    let stdout = child.stdout.take().unwrap();
+    let (ready, wait) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut captured = Vec::new();
+        loop {
+            let mut line = Vec::new();
+            if reader.read_until(b'\n', &mut line).unwrap() == 0 {
+                return captured;
+            }
+            if String::from_utf8_lossy(&line).contains(" INFO Listening: ws://") {
+                let _ = ready.send(());
+            }
+            captured.extend_from_slice(&line);
+        }
+    });
+    if let Err(error) = wait.recv_timeout(Duration::from_secs(3)) {
+        let _ = child.kill();
+        let output = child.wait_with_output().unwrap();
+        panic!(
+            "CLI did not announce readiness: {error}; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&reader.join().unwrap()),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    drop(child.stdin.take());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("CLI did not exit within five seconds of EOF");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut output = child.wait_with_output().unwrap();
+    output.stdout = reader.join().unwrap();
+    output
 }
-#[test]
-fn terminal_commands_revoke_switch_port_without_saving_or_printing_input() {
+
+async fn terminal_command_sequence(quit: bool) {
     let token = "UniquePrivatePairingToken0123456789";
-    let input = format!("{token}\nstatus\nstart\nstop\nrevoke\nport 18020\nstatus\nhelp\nquit\n");
-    let (out, config) = run(&[], &input);
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(out.status.success(), "{text}");
+    let mut cli = InteractiveCli::launch().await;
+    let original_url = cli.url.clone();
+    // Keep stdin open and omit quit until every asserted command result has
+    // reached stdout. Startup readiness alone cannot drain subsequent records.
+    cli.write(&format!(
+        "{token}\nstatus\nstart\nstop\nrevoke\nport 18020\nstatus\nhelp\n"
+    ))
+    .await;
+    cli.until("Connect an approved, unexpired webpage first.")
+        .await;
+    let port_record = cli.until("(this process only)").await;
+    let new_url = port_record
+        .split_once("Listening: ")
+        .unwrap()
+        .1
+        .strip_suffix(" (this process only)")
+        .unwrap();
+    let address: std::net::SocketAddr = new_url.strip_prefix("ws://").unwrap().parse().unwrap();
+    assert_eq!(address.ip(), std::net::Ipv4Addr::LOCALHOST);
+    assert!((18020..18040).contains(&address.port()), "{port_record}");
+    assert_ne!(new_url, original_url);
+    // Check the announced replacement is really bound, not merely logged.
+    let connection = tokio::net::TcpStream::connect(address).await.unwrap();
+    drop(connection);
+    cli.until("Commands:").await;
+    // A fresh status after help is a FIFO output barrier: its state line is
+    // observed only after all prior command/help records have been rendered.
+    cli.write("status\n").await;
+    let status_listener = cli.until("Listening: ").await;
+    assert!(status_listener.ends_with(new_url), "{status_listener}");
+    cli.until("connected=false scanning=false").await;
+    if quit {
+        cli.write("quit\n").await;
+    }
+    let text = cli.finish(!quit).await;
     assert!(text.contains("Listening: ws://127.0.0.1:"));
     assert!(text.contains("Commands:"));
     assert!(text.contains("Connect an approved, unexpired webpage first."));
     assert!(text.contains("(this process only)"));
-    assert_eq!(std::fs::read_dir(&config).unwrap().count(), 0);
     assert!(text.contains("connected=false scanning=false"));
     assert!(!text.contains("Helper stopped."));
     assert!(!text.contains(token));
     assert!(!text.contains("Local controls:"));
     assert!(!text.contains("/#"));
-    std::fs::remove_dir_all(config).unwrap();
 }
+
+#[tokio::test]
+async fn terminal_commands_revoke_switch_port_without_saving_or_printing_input() {
+    terminal_command_sequence(true).await;
+}
+
+#[tokio::test]
+async fn terminal_command_output_is_observed_before_eof_shutdown() {
+    terminal_command_sequence(false).await;
+}
+
 #[test]
 fn occupied_listen_prints_actual_fallback_and_eof_exits() {
     let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let requested = held.local_addr().unwrap().to_string();
-    let (out, config) = run(&["--listen", &requested], "");
+    let config = std::env::temp_dir().join(format!("helper-eof-{}", rand::random::<u64>()));
+    std::fs::create_dir_all(&config).unwrap();
+    let out = ready_then_eof(&["--listen", &requested], &config);
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success());
-    let actual = text
-        .lines()
-        .find_map(|l| l.split_once("Listening: ").map(|(_, address)| address))
-        .unwrap();
-    assert_ne!(actual, format!("ws://{requested}"));
-    assert!(actual.starts_with("ws://127.0.0.1:"));
-    assert!(!actual.contains("/bridge"));
-    assert_eq!(text.lines().count(), 1);
+    let actual = startup_output(&text).listener.unwrap();
+    assert_ne!(actual.to_string(), requested);
     assert!(out.stderr.is_empty());
     assert!(!text.contains("Helper stopped."));
     std::fs::remove_dir_all(config).unwrap();
@@ -94,7 +196,7 @@ impl InteractiveCli {
             )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .unwrap();
@@ -115,15 +217,16 @@ impl InteractiveCli {
             .unwrap()
             .1
             .into();
-        assert_eq!(cli.output.lines().count(), 1);
-        assert!(cli.output.contains(" INFO "));
-        assert!(!cli.output.contains('\x1b'));
-        assert!(tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            cli.stdout.next_line()
-        )
-        .await
-        .is_err());
+        let mut startup = startup_output(&cli.output);
+        // The unsupported USB backend reports one warning on macOS at its
+        // first tick. Keep rejecting every other unsolicited startup record.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(200);
+        while let Ok(line) = tokio::time::timeout_at(deadline, cli.stdout.next_line()).await {
+            let line = line.unwrap().expect("CLI exited during startup");
+            cli.output.push_str(&line);
+            cli.output.push('\n');
+            startup.observe(&line, PHYSICAL_USB_SUPPORTED).unwrap();
+        }
         cli
     }
     async fn until(&mut self, needle: &str) -> String {
@@ -185,8 +288,10 @@ impl InteractiveCli {
             .unwrap();
         socket
     }
-    async fn finish(mut self) {
-        self.stdin.take();
+    async fn finish(mut self, close_stdin: bool) -> String {
+        if close_stdin {
+            self.stdin.take();
+        }
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), self.child.wait())
             .await
             .unwrap()
@@ -196,10 +301,21 @@ impl InteractiveCli {
             self.output.push_str(&line);
             self.output.push('\n');
         }
+        use tokio::io::AsyncReadExt;
+        self.child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut self.output)
+            .await
+            .unwrap();
         assert!(!self.output.contains("NeverLogIncomingToken0123456789ABCD"));
         assert!(!self.output.contains("Approved:"));
+        assert!(!self.output.contains("Connected:"));
         assert!(!self.output.contains("scanning=true"));
+        assert_eq!(std::fs::read_dir(&self.config).unwrap().count(), 0);
         std::fs::remove_dir_all(&self.config).unwrap();
+        self.output
     }
 }
 #[tokio::test]
@@ -219,7 +335,7 @@ async fn non_tty_confirmation_rejects_without_prompt_or_waiting_forever() {
     assert!(!cli.output.contains("[ Approve ]"));
     assert!(!cli.output.contains("Approved:"));
     assert!(!cli.output.contains("Connected:"));
-    cli.finish().await;
+    cli.finish(true).await;
 }
 #[tokio::test]
 async fn piped_yes_enter_and_fake_choice_cannot_approve() {
@@ -235,13 +351,13 @@ async fn piped_yes_enter_and_fake_choice_cannot_approve() {
         .unwrap();
     assert!(frame.into_text().unwrap().contains("closed"));
     assert!(!cli.output.contains("Approved:"));
-    cli.finish().await;
+    cli.finish(true).await;
 }
 
 #[test]
 fn generated_help_and_version_exit_without_listener_or_errors() {
     for flag in ["--help", "-h", "--version", "-V"] {
-        let (out, config) = run(&[flag], "");
+        let (out, config) = run_arguments(&[flag]);
         assert!(out.status.success());
         assert!(out.stderr.is_empty());
         let text = String::from_utf8(out.stdout).unwrap();
@@ -266,7 +382,7 @@ fn invalid_arguments_report_errors_only_on_stderr() {
         vec!["--listen", "0.0.0.0:10233"],
         vec!["--listen", "127.0.0.1:80"],
     ] {
-        let (out, config) = run(&args, "");
+        let (out, config) = run_arguments(&args);
         assert!(!out.status.success());
         assert!(out.stdout.is_empty());
         assert!(String::from_utf8_lossy(&out.stderr).contains("error:"));
@@ -288,20 +404,14 @@ fn new_process_ignores_all_saved_port_paths_even_when_invalid() {
         std::fs::write(folder.join("port"), "invalid legacy configuration").unwrap();
     }
     for _ in 0..2 {
-        let out = Command::new(env!("CARGO_BIN_EXE_webauthn-helper"))
-            .env("XDG_CONFIG_HOME", &config)
-            .env("APPDATA", &config)
-            .env("HOME", &config)
-            .stdin(Stdio::null())
-            .output()
-            .unwrap();
+        let out = ready_then_eof(&[], &config);
         assert!(
             out.status.success(),
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
         let stdout = String::from_utf8(out.stdout).unwrap();
-        let port: u16 = stdout.trim().rsplit(':').next().unwrap().parse().unwrap();
+        let port = startup_output(&stdout).listener.unwrap().port();
         assert!((10233..10253).contains(&port), "{stdout}");
     }
     for name in [

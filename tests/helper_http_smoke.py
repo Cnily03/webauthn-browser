@@ -7,6 +7,7 @@ import re
 import select
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -36,8 +37,24 @@ def main():
                     if match:address=match.group(1).decode();break
                 if address:break
             assert address,'CLI did not print actual listening address'
-            assert re.fullmatch(rb'\d{4}-\d{2}-\d{2}T[^ ]+Z +INFO Listening: ws://' + re.escape(address.encode()) + rb'\n', output), output
-            assert not select.select([process.stdout,process.stderr],[],[],.25)[0], 'Unexpected idle output'
+            # Unsupported physical USB reports once at the first controller tick.
+            # Keep every other unsolicited startup line an error.
+            idle_deadline=time.monotonic()+.25
+            while time.monotonic()<idle_deadline:
+                ready,_,_=select.select([process.stdout,process.stderr],[],[],max(0,idle_deadline-time.monotonic()))
+                for pipe in ready:
+                    chunk=os.read(pipe.fileno(),8192)
+                    assert chunk, 'CLI unexpectedly exited during startup'
+                    assert pipe is process.stdout, chunk
+                    output+=chunk
+            startup_lines=output.splitlines(keepends=True)
+            listener_pattern=rb'\d{4}-\d{2}-\d{2}T[^ ]+Z +INFO Listening: ws://' + re.escape(address.encode()) + rb'\n'
+            assert sum(bool(re.fullmatch(listener_pattern,line)) for line in startup_lines)==1, output
+            other_lines=[line for line in startup_lines if not re.fullmatch(listener_pattern,line)]
+            assert not other_lines or (
+                sys.platform not in ('linux','win32') and len(other_lines)==1
+                and re.fullmatch(rb'\d{4}-\d{2}-\d{2}T[^ ]+Z +WARN USB: unavailable\n',other_lines[0])
+            ), output
             assert int(address.rsplit(':',1)[1])!=port
             origin='http://'+address
             client=urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -53,7 +70,20 @@ def main():
                 raise AssertionError('Foreign Host accepted')
             except urllib.error.HTTPError as error:assert error.code==403
             secret='NeverLogTestPairingToken0123456789'
-            stdout,stderr=process.communicate(input=f'{secret}\nstatus\nquit\n'.encode(),timeout=10)
+            # The CLI intentionally does not drain its logging worker at exit.
+            # Observe the complete status record before requesting shutdown.
+            process.stdin.write(f'{secret}\nstatus\n'.encode()); process.stdin.flush()
+            status_output=b''; deadline=time.monotonic()+10
+            while b'connected=false scanning=false received=0\n' not in status_output:
+                assert time.monotonic()<deadline, ('Missing status output',status_output)
+                ready,_,_=select.select([process.stdout,process.stderr],[],[],.2)
+                for pipe in ready:
+                    chunk=os.read(pipe.fileno(),8192)
+                    assert chunk, 'CLI exited before status output'
+                    assert pipe is process.stdout, chunk
+                    status_output+=chunk
+            output+=status_output
+            stdout,stderr=process.communicate(input=b'quit\n',timeout=10)
             output+=stdout+stderr
             assert process.returncode==0
             assert secret.encode() not in output

@@ -54,6 +54,18 @@ withholding after explicit rejection/revocation, terminal restoration, channel
 independence, strict report framing, renewals, stale generations and cancellation.
 Logging tests use the actual CLI/Desktop initialization to verify ANSI/NO_COLOR,
 TTY selection, INFO state changes, DEBUG counters and dependency-log suppression.
+CLI subprocess tests parse the listener announcement separately from lifecycle
+logs. Unsupported physical USB backends (including macOS) may emit exactly one
+`WARN USB: unavailable` startup record; unrelated and duplicate records still
+fail. Synthetic startup records cover this ordering on every platform. EOF tests
+wait for the listener announcement before closing stdin, because the bounded,
+best-effort logger intentionally does not drain at process exit. They then
+require exit within five seconds. Command-stream tests also wait for the final
+status response after help before sending quit or EOF; observing startup alone
+cannot guarantee that later command output reached the log sink. Both shutdown
+paths run the full command sequence, and the quit case keeps stdin open until
+the process exits. The HTTP smoke test likewise observes status before quitting.
+These fixtures do not replace native macOS CI.
 Controller fixtures use fake devices and real local WebSockets; they never open
 an actual authenticator. See [helper build instructions](helper/README.md) for
 platform dependencies, final release commands and cross-compilation checks.
