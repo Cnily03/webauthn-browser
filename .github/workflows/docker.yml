@@ -8,6 +8,9 @@ on:
         description: "Docker image name and tag"
         required: true
         default: "webauthn-browser:latest"
+      upload:
+        description: "Upload artifact"
+        required: false
       publish_tag:
         description: "ghcr.io TAG"
         required: false
@@ -39,6 +42,7 @@ jobs:
 
       - name: Export image
         id: export
+        if: ${{ inputs.upload != '' }}
         run: |
           image='${{ steps.build.outputs.image }}'
           output_fn="$(echo "$image" | tr ':' '_')"
@@ -47,6 +51,7 @@ jobs:
           sha256sum '${{ runner.temp }}/image.tar' > '${{ runner.temp }}/image.tar.sha256'
 
       - name: Upload artifact
+        if: ${{ inputs.upload != '' }}
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
