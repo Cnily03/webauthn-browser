@@ -415,6 +415,16 @@ Chromium profile. No proxy credentials/configuration or host proxy changes are
 injected. A fresh installation uses upstream's system default. See
 [version, hashes, license and source](../vendor/zeroomega/README.md).
 
+## Bundled WebRTC control extension
+
+The image also includes official Manifest V3 WebRTC Control 0.3.5, alongside the
+engine, ZeroOmega and user-installed extensions. Its toolbar button toggles
+protection; options and toggle state persist separately in each browser profile.
+Fresh extension storage uses upstream protection-enabled defaults, including
+blocking non-proxied WebRTC UDP. This can affect video calls or peer connections.
+Existing settings are not reset. See [identity, defaults and pinned package
+provenance](../vendor/webrtc-control/README.md).
+
 ## Data, source and operational limits
 
 Compose persists:

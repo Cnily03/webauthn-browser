@@ -29,7 +29,7 @@ FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        ca-certificates chromium chromium-sandbox fontconfig fonts-dejavu-core \
-       fonts-liberation fonts-noto-cjk novnc openbox python3 python3-xlib python3-dbus python3-gi dbus tini wmctrl x11-utils x11-xserver-utils x11vnc xvfb \
+       fonts-liberation fonts-noto-cjk novnc openbox python3 python3-cryptography python3-xlib python3-dbus python3-gi dbus tini wmctrl x11-utils x11-xserver-utils x11vnc xvfb \
     && fc-cache -f -s \
     && fc-list --quiet 'Noto Sans CJK SC:charset=4e2d 6587' \
     && rm -rf /var/lib/apt/lists/* \
@@ -51,6 +51,11 @@ RUN python3 /opt/webauthn-browser/runtime/install_zeroomega.py \
     --lock /opt/webauthn-browser/vendor/zeroomega/release.json \
     --target /opt/webauthn-browser/extensions/zeroomega \
     --source-target /opt/webauthn-browser/licenses/zeroomega
+COPY vendor/webrtc-control /opt/webauthn-browser/vendor/webrtc-control
+RUN python3 /opt/webauthn-browser/runtime/install_webrtc_control.py \
+    --lock /opt/webauthn-browser/vendor/webrtc-control/release.json \
+    --target /opt/webauthn-browser/extensions/webrtc-control \
+    --provenance-target /opt/webauthn-browser/licenses/webrtc-control
 # Fixed system path avoids ambiguity from --user-data-dir and XDG_CONFIG_HOME.
 COPY runtime/com.auth_browser.proxy.json /etc/chromium/native-messaging-hosts/com.auth_browser.proxy.json
 RUN chmod 0555 /opt/webauthn-browser/extension \

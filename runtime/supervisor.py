@@ -690,7 +690,7 @@ class Supervisor:
             f"--disk-cache-dir={CACHE_PATH / 'chromium'}",
             "--no-first-run", "--no-default-browser-check", "--disable-dev-shm-usage",
             "--disable-background-mode",
-            "--load-extension=/opt/webauthn-browser/extension,/opt/webauthn-browser/extensions/zeroomega",
+            "--load-extension=/opt/webauthn-browser/extension,/opt/webauthn-browser/extensions/zeroomega,/opt/webauthn-browser/extensions/webrtc-control",
             "--disable-gpu", "--window-size=1440,900", "--start-maximized", "about:blank",
         ]
         if self.no_sandbox:

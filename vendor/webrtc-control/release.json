@@ -1,0 +1,14 @@
+{
+  "version": "0.3.5",
+  "extension_id": "fjkmabmdepjfammlpliljpnbhleegehm",
+  "manifest_key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAs/OXrJ14BcJhnW7uoKLOsSWBOm80Y3uQAMB2wMIkPbO2tnKKnUHU/RkHS7sIwO2rPlDLMCZ+bvX7cNdcl2KVwJCHwmIR/NSzd1XlMsPFcd2+7gerToaiHLcj71RMeLH1hpLAUsRnbrkcSNMxpGoUnmfrVC/RPy46oyTDnSq3RhCR9dhMz3mzBJ955OrRZhzWw2nWae+s3tQ5DPFcxInQ1EB9PpseNfSa7nB/EIu/o3TlmH0uHfPgW2J4fdJQJ4ne7YGPgDmjaE/7dkxkri4qF94kr2uaLrq2PAWs7j4VErNQMol6gwrqymo+dXgW0F1NDopKbM7UJhymFy5R2u6yhQIDAQAB",
+  "archive": {
+    "filename": "webrtc-control-0.3.5.crx",
+    "url": "https://clients2.googleusercontent.com/crx/blobs/AZPVhcQmX_sENcTVQEZ_w7rbBqbAMbfddRp_eaXhq_w1BeGbEYcSZAASYm6w3YVwCBN9vcl2FcmEZB0dlYZrt5z692nvXs3JzZc3vfV0XubXqo3JtUvZnCnHsULDNpueGjAAxlKa5XyHd_MY4-uxHvACTf5LOU7-0cHZ/FJKMABMDEPJFAMMLPLILJPNBHLEEGEHM_0_3_5_0.crx",
+    "sha256": "9e5b82cedd9374e6bc132296eb8918c655d8df28d554a0fe8a57423f24c91b67"
+  },
+  "store_url": "https://chromewebstore.google.com/detail/webrtc-control/fjkmabmdepjfammlpliljpnbhleegehm",
+  "publisher": "Grephy",
+  "homepage_url": "https://mybrowseraddon.com/webrtc-control.html",
+  "key_provenance": "Publisher RSA SHA-256 CRX3 signature verified; signed ID and derived public-key ID match official Chrome Web Store."
+}

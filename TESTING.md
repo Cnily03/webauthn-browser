@@ -541,3 +541,29 @@ intermittent USB problems. This development environment did not verify physical
 authenticators/phones, real Chromium session restoration, Windows runtime behavior,
 or a built Docker image's visual output. A helper connection, BLE scan or USB
 READY event alone is not end-to-end authentication evidence.
+
+## WebRTC Control packaging
+
+`python3 -m unittest discover -s tests -p 'webrtc_control_test.py'` requires
+Python `cryptography` (the image installs Debian's `python3-cryptography`). It
+checks signed CRX fixtures, pinned identity/source, checksum/signature failures,
+MV3 validation, unsafe archives, read-only assets and profile-safe coexistence.
+The actual official 0.3.5 CRX download and installer were also verified. These
+checks do not prove Chromium extension execution or container upgrade behavior.
+
+Deployment acceptance: open a fresh profile and verify all three bundled
+extensions, the WebRTC Control official ID, toolbar toggle and options; change
+its options, restart the browser, then recreate the image with the same `/data`
+mount and confirm the options, other extension settings and browser data remain.
+Repeat in an existing profile and a second independent profile. Confirm WebRTC
+behavior with protection on/off against the intended calling or test site.
+Docker is unavailable in the current validation environment. Local Chromium
+startup is blocked by sandbox socket permissions, so these browser/container
+acceptance steps have not been reported as passing.
+
+Validation on the WebRTC Control change: Python discovery ran 453 tests with
+`OK (skipped=3)`; the seven new WebRTC Control tests and all three tracked Docker
+context contracts passed. All `tests/extension_*test.cjs` VM suites passed,
+including 92 local-navigation cases and 21 managed-window cases. The existing
+packaged engine fingerprint/host verification and `git diff --check` also passed.
+No Rust or frontend source changed; their build/test suites were not rerun.

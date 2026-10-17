@@ -64,7 +64,8 @@ class DockerContextTests(unittest.TestCase):
             for required in ('src/fido-relay/src/control.rs', 'extension/build.sha256',
                              'native-hid-hook/build.rs', 'native-hid-hook/native/abi.c',
                              'native-hid-hook/Cargo.lock', 'helper/build.rs',
-                             'vendor/zeroomega/release.json', 'web/pnpm-lock.yaml'):
+                             'vendor/zeroomega/release.json', 'vendor/webrtc-control/release.json',
+                             'runtime/install_webrtc_control.py', 'web/pnpm-lock.yaml'):
                 self.assertTrue((context / required).is_file(), required)
 
     def test_downloads_are_empty_image_mount_not_a_build_input(self):

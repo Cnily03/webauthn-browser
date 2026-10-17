@@ -57,3 +57,11 @@ Linux basic-udev 0.1.2 is MIT OR Apache-2.0; nix 0.30.1 is MIT. Exact upstream
 copyright/license texts and source links are retained in
 helper/THIRD_PARTY_LICENSES.txt. No device permissions or hardware access are
 implied by these license notices.
+
+WebRTC Control
+--------------
+Container image builds fetch WebRTC Control 0.3.5 from the official Google Chrome
+Web Store distribution, offered by Grephy. Source bundles contain no copy of the
+CRX. Its own third-party terms apply; the Chrome artifact declares no license,
+and this project does not relicense it. See vendor/webrtc-control/README.md and
+release.json for identity, signed provenance and redistribution limitations.
