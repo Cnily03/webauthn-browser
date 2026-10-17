@@ -139,3 +139,41 @@ A page's `ServiceWorkerRegistration.unregister()` is not equivalent:
 [MayDeleteServiceWorkerRegistration](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/chrome/browser/extensions/chrome_content_browser_client_extensions_part.cc)
 protects enabled, version-valid extension root workers; the extension layer owns
 unregistration and re-registration for its lifecycle.
+
+## Exclusive profile ownership and container recreation
+
+The shipped Compose file sets `AUTH_BROWSER_EXCLUSIVE_PROFILE=true`: its `.data`
+bind mount is dedicated to this service. Never run another container or Chromium
+against the same profile at the same time, including an older image. This is an
+explicit deployment contract, not a claim that a foreign container PID can be
+inspected from the current container. Custom deployments default to no automatic
+singleton recovery unless they explicitly make the same exclusivity assertion.
+
+Each profile worker holds a persistent `.webauthn-browser-profile.lock` advisory
+lock in its Chromium directory for its entire lifetime, including browser
+restarts. Cooperating containers cannot concurrently acquire that profile. The
+lock file is retained; deleting or replacing it defeats this coordination.
+
+After `docker compose down` followed by `docker compose up`, Chromium can leave
+`SingletonLock`, `SingletonSocket` and `SingletonCookie` links naming the old
+container. Before launching Chromium, the explicitly exclusive deployment checks
+for visible profile users, a live same-host PID and an active singleton socket,
+then removes only unchanged, user-owned singleton symlinks. It never follows or
+deletes their targets and never clears browser data, extensions, cookies or
+credentials. Unsafe or ambiguous artifacts are refused. The persistent lock does
+not independently prove an old non-cooperating or foreign-container browser dead;
+the exclusivity contract is required for that case.
+
+An offline maintenance helper is also available. Only after stopping every browser
+and container using the profile and confirming it is not shared, run
+`python3 runtime/browser_profile_lock.py --profile /path/to/chromium --confirm-exclusive-profile`
+as the profile's owning user. This is optional; the shipped Compose deployment
+performs the narrowly scoped recovery automatically.
+
+For custom deployments where `/data/run` persists across recreation, old
+foreign-namespace runtime manifests have a separate bounded recovery path. It
+requires the exclusive manager lock, an exact matching local display lease, no
+current live resource generation and inactive known sockets. Old foreign PIDs
+are never signaled and persistent browser data is never removed. Missing or
+changed ownership evidence remains blocked; this is not blanket cleanup of a
+foreign manifest. Standard Compose uses a fresh `/data/run` tmpfs.

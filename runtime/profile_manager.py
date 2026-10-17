@@ -520,7 +520,14 @@ class ProfileManager:
                     # durable generation immediately before forced signaling.
                     if resources.read(record.paths) != record.manifest:
                         raise resources.ResourceError('resource_generation_changed')
-                    if not resources.reconcile(record.manifest, deadline, force=True):
+                    if resources.retired_namespace(record.manifest):
+                        # A previous container's numeric PIDs are never signal
+                        # authority. Only inactive, exactly recorded transients
+                        # may be removed under our exclusive manager lock.
+                        if record.worker is not None or self.manager_lock is None:
+                            raise resources.ResourceError('ownership_unconfirmed')
+                        resources.confirm_retired_transient(record.paths, record.manifest, deadline)
+                    elif not resources.reconcile(record.manifest, deadline, force=True):
                         raise resources.ResourceError('process_survived')
                 if record.worker is not None:
                     # A forced negative exit code is expected; complete only

@@ -433,6 +433,63 @@ def remove_display(paths, manifest):
         path.unlink()
 
 
+
+def retired_namespace(manifest):
+    current = namespace()
+    if (type(manifest.get('uid')) is not int or manifest['uid'] != current['uid']
+            or not isinstance(manifest.get('boot'), str) or not manifest['boot']
+            or not isinstance(manifest.get('pid_namespace'), str) or not manifest['pid_namespace']):
+        raise ResourceError('invalid_resource_namespace')
+    return any(manifest[key] != current[key] for key in ('boot', 'pid_namespace'))
+
+
+def confirm_retired_transient(paths, manifest, deadline):
+    """Prove bounded restart cleanup without inspecting or signaling old PIDs.
+
+    The caller holds the exclusive manager lock. A matching container-local
+    display lease is required as well: a foreign boot or PID namespace alone
+    does not establish ownership of shared or imported runtime files.
+    """
+    current = namespace()
+    if not retired_namespace(manifest) or read(paths) != manifest:
+        raise ResourceError('resource_generation_changed')
+    lease = read_display(paths.profile_id)
+    if any(lease[key] != manifest[key] for key in
+           ('profile_id', 'slot', 'runtime_epoch', 'generation', 'boot', 'pid_namespace', 'uid')):
+        raise ResourceError('display_generation_changed')
+    # This is a read-only inventory in the current namespace. Reusing the old
+    # marker in a living process cannot authorize deleting its transport.
+    if scan(dict(manifest, **current), deadline=deadline):
+        raise ResourceError('retired_generation_still_live')
+    for name in sorted(SOCKETS):
+        if time.monotonic() >= deadline:
+            raise ResourceError('resource_cleanup_timeout')
+        path = paths.runtime / name
+        try:
+            before = path.lstat()
+        except FileNotFoundError:
+            continue
+        if before.st_uid != current['uid'] or not stat.S_ISSOCK(before.st_mode):
+            raise ResourceError('unsafe_transient_resource')
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM | socket.SOCK_CLOEXEC) as probe:
+            probe.settimeout(min(.1, max(.001, deadline - time.monotonic())))
+            try:
+                probe.connect(str(path))
+            except OSError as error:
+                if error.errno not in (errno.ECONNREFUSED, errno.ENOENT):
+                    raise ResourceError('retired_socket_unconfirmed') from None
+            else:
+                raise ResourceError('retired_socket_active')
+        try:
+            after = path.lstat()
+        except FileNotFoundError:
+            continue
+        if (before.st_dev, before.st_ino, before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_ctime_ns):
+            raise ResourceError('transient_resource_changed')
+    if read(paths) != manifest:
+        raise ResourceError('resource_generation_changed')
+
+
 def remove_transient(paths, manifest):
     """Only known runtime files, through a pinned directory and exact manifest."""
     try:

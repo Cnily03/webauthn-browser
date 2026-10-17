@@ -1020,6 +1020,34 @@ describe('first-viewer engine ownership', () => {
     expect(screen.getByRole('button', {name: '接管控制'})).toBeVisible();
     expect(pathCalls('/api/viewer/acquire')).toHaveLength(1);
   });
+  it('refreshes the rotated CSRF token before explicit takeover after a container outage', async () => {
+    authenticated = true; await mount('/profile/default');
+    const original = vi.mocked(fetch).getMockImplementation()!;
+    let offline = true;
+    const acquisitions: string[] = [];
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      const path = String(input);
+      if (offline) throw new TypeError('container restarting');
+      if (path === '/p/default/api/status') {
+        const response = await original(input, init);
+        return Response.json({...await response.json(), csrf_token: 'restarted-csrf'});
+      }
+      if (path === '/p/default/api/viewer/acquire') {
+        const csrf = (init?.headers as Record<string, string>)['X-CSRF-Token'];
+        acquisitions.push(csrf);
+        if (csrf !== 'restarted-csrf') return Response.json({error: 'CSRF validation failed'}, {status: 403});
+      }
+      return original(input, init);
+    });
+    act(() => clients[0].emit('disconnect')); await act(flush);
+    expect(screen.queryByRole('button', {name: '接管控制'})).toBeNull();
+    offline = false; await advance(1000);
+    viewer = {...viewer, viewer_id: 'after-container-restart', viewer_token: 'b'.repeat(64)};
+    fireEvent.click(screen.getByRole('button', {name: '接管控制'})); await act(flush);
+    expect(acquisitions).toEqual(['restarted-csrf']);
+    expect(clients).toHaveLength(2);
+    expect(browserActions().every(call => call.body.action === 'ensure')).toBe(true);
+  });
   it('does not offer takeover during profile revocation discovered by viewer polling', async () => {
     authenticated = true; await mount('/profile/default');
     configuration.profiles = [];

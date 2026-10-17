@@ -4,6 +4,10 @@ services:
     build: .
     restart: unless-stopped
     command: ["--no-sandbox"]
+    # This .data belongs exclusively to this service. Never share it with a
+    # concurrently running container/browser; see docs/runtime-storage.md.
+    environment:
+      AUTH_BROWSER_EXCLUSIVE_PROFILE: "true"
     volumes:
       - "./.data:/data"
       - "./downloads:/downloads:ro"

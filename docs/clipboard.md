@@ -48,6 +48,23 @@ obtains a fresh single-use ticket. Clipboard recovery does not restart Chromium,
 reload tabs or reconnect VNC. A copy/paste interrupted by failure must be repeated;
 its text or pending permission request is never replayed after recovery.
 
+The bridge also recovers a lost X connection with a fresh display/session and
+250 ms exponential retry delay capped at five seconds. A session surviving one
+minute resets that delay. Teardown first drops all pending requests, partial
+messages, copy captures and INCR transfers; it closes the broken connection
+without issuing further X requests. SIGTERM/SIGINT cancels retries, including
+when X is unavailable during startup. No text is replayed into the replacement
+session. A dead Xvfb process still belongs to the broader desktop recovery path;
+a clipboard traceback during container shutdown alone does not identify why a
+new container's browser failed to connect.
+
+If the clipboard process itself exits while the desktop is active, its supervisor
+restarts only that process with a one-second retry delay doubling to 30 seconds.
+One minute of a live process and socket resets the delay. Intentional desktop
+shutdown cancels recovery; an exited Xvfb, window manager or VNC service retains
+the existing desktop failure handling. Clipboard-only recovery does not rotate
+browser/profile epochs, detach the engine or touch stored browser data.
+
 The relay sends transport-only Ping frames every 15 seconds. A missing matching
 Pong at the next interval closes the private bridge connection, releasing a dead
 controller instead of leaving reconnects permanently blocked. These frames do not

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ApiError, request } from './api';
+import { ApiError, request, setCsrfToken } from './api';
 import { browserProfileName, setProfileViewer, viewerHeaders, type ProfileViewer, type PublicProfileConfiguration } from './profiles';
 
 type ViewerStatus = Omit<ProfileViewer, 'viewer_token'>;
@@ -80,9 +80,14 @@ export function useProfileViewer(onUnauthorized: (reason?: 'unauthorized' | 'una
         if (!catalog.profiles.some(profile => profile.name === profileName && profile.effective_enabled === true)) {
           unauthorized.current('unavailable'); return;
         }
-        const status = await request<{vnc_authenticated: boolean}>('/api/status', 'GET', undefined, {signal: controller.signal});
+        const status = await request<{vnc_authenticated: boolean; csrf_token: string}>('/api/status', 'GET', undefined, {signal: controller.signal});
         if (!current()) return;
         if (status.vnc_authenticated !== true) { unauthorized.current('unauthorized'); return; }
+        // A gateway restart rotates the cookie-bound CSRF token. The initial
+        // disconnect refresh may have failed while it was offline; install the
+        // revalidated token before enabling an explicit new viewer acquisition.
+        if (typeof status.csrf_token !== 'string' || !status.csrf_token) throw new Error('浏览器连接授权无效。');
+        setCsrfToken(status.csrf_token);
         recheckAccess = false; setCanAcquire(true);
       } catch (failure) {
         if (current() && !controller.signal.aborted) failed(failure);

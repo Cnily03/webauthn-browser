@@ -12,6 +12,7 @@ import select
 import signal
 import socket
 import time
+import threading
 import uuid
 
 MAX_TEXT = 1024 * 1024
@@ -79,6 +80,27 @@ class Requests:
 
 class Bridge:
     def __init__(self):
+        self.client = None
+        self.input = bytearray()
+        self.output = bytearray()
+        self.output_deadline = None
+        self.input_deadline = None
+        self.capture = None
+        self.transfers = {}
+        self.requests = Requests(self.send, self.answer)
+        self.stopping = False
+        self.stop_event = threading.Event()
+        self.display = None
+        self.window = None
+        self.closed = False
+        try:
+            self.connect_display()
+        except BaseException:
+            # Construction can fail after opening X but before creating a window.
+            self.close()
+            raise
+
+    def connect_display(self):
         # Imported only in the runtime, allowing dependency-free state tests.
         from Xlib import X, Xatom, display, protocol, error
         from Xlib.ext import xfixes
@@ -98,15 +120,6 @@ class Bridge:
             'text/plain', 'STRING', 'INCR', '_AUTH_BROWSER_COPY')}
         self.clipboard = self.atoms['CLIPBOARD']
         self.display.xfixes_select_selection_input(self.window, self.clipboard, 7)
-        self.client = None
-        self.input = bytearray()
-        self.output = bytearray()
-        self.output_deadline = None
-        self.input_deadline = None
-        self.capture = None
-        self.transfers = {}
-        self.requests = Requests(self.send, self.answer)
-        self.stopping = False
         self.own()
         self.display.sync()
 
@@ -131,6 +144,8 @@ class Bridge:
         return True
 
     def disconnect(self):
+        if self.closed:
+            return
         client, self.client = self.client, None
         if client:
             client.close()
@@ -144,6 +159,33 @@ class Bridge:
             self.finish_transfer(key, transfer)
         self.drop_capture()
         self.own()
+
+    def close(self):
+        """Idempotent local teardown, including after a broken X connection.
+
+        Closing the connection releases its X resources. Do not answer pending
+        requests, destroy windows, or reclaim ownership on an unusable display.
+        """
+        if self.closed:
+            return
+        self.closed = True
+        self.stopping = True
+        client, self.client = self.client, None
+        display, self.display = self.display, None
+        self.window = None
+        self.input.clear()
+        self.output.clear()
+        self.input_deadline = self.output_deadline = None
+        self.requests.pending.clear()
+        self.transfers.clear()
+        self.capture = None
+        # One failed close must not prevent releasing the other resource.
+        for resource in (client, display):
+            if resource is not None:
+                try:
+                    resource.close()
+                except Exception:
+                    pass
 
     def notify(self, event, property_atom):
         event.requestor.send_event(self.protocol.event.SelectionNotify(
@@ -202,9 +244,9 @@ class Bridge:
             self.notify(event, self.X.NONE)
 
     def drop_capture(self):
-        if self.capture:
-            self.capture['window'].destroy()
-            self.capture = None
+        capture, self.capture = self.capture, None
+        if capture:
+            capture['window'].destroy()
 
     def fail_capture(self, error='unavailable'):
         if self.capture:
@@ -326,22 +368,28 @@ class Bridge:
             self.disconnect()
 
     def run(self, path=SOCKET_PATH):
-        if path.is_symlink():
-            raise RuntimeError('Refusing symbolic link at clipboard socket')
-        path.unlink(missing_ok=True)
-        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        server.bind(str(path))
-        path.chmod(0o600)
-        server.listen(4)
-        server.setblocking(False)
+        server = None
+        bound_identity = None
         try:
-            while not self.stopping:
-                while self.display.pending_events():
+            if path.is_symlink() or (path.exists() and not path.is_socket()):
+                raise RuntimeError('Refusing unsafe clipboard socket path')
+            path.unlink(missing_ok=True)
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server.bind(str(path))
+            info = path.stat()
+            bound_identity = (info.st_dev, info.st_ino)
+            path.chmod(0o600)
+            server.listen(4)
+            server.setblocking(False)
+            while not self.stopping and not self.stop_event.is_set():
+                while not self.stopping and not self.stop_event.is_set() and self.display.pending_events():
                     try:
                         self.event(self.display.next_event())
                     except self.XError:
                         # A synchronous property read can race a destroyed window.
                         self.fail_capture()
+                if self.stopping or self.stop_event.is_set():
+                    break
                 self.requests.expire()
                 if any(deadline is not None and time.monotonic() >= deadline
                        for deadline in (self.input_deadline, self.output_deadline)):
@@ -376,21 +424,63 @@ class Bridge:
                     except OSError:
                         self.disconnect()
         finally:
-            self.disconnect()
-            server.close()
-            path.unlink(missing_ok=True)
-            self.window.destroy()
-            self.display.close()
+            self.close()
+            if server is not None:
+                try:
+                    server.close()
+                except OSError:
+                    pass
+            # Do not unlink another generation's replacement listener.
+            if bound_identity is not None:
+                try:
+                    info = path.lstat()
+                    if (info.st_dev, info.st_ino) == bound_identity:
+                        path.unlink()
+                except OSError:
+                    # A vanished or unavailable runtime directory must not mask
+                    # the failure that initiated teardown.
+                    pass
+
+
+def run_service(stopped, factory=Bridge, retry_errors=None):
+    """Retry only lost/unavailable transports, always with a fresh session."""
+    if retry_errors is None:
+        from Xlib.error import DisplayConnectionError, ConnectionClosedError
+        retry_errors = (OSError, EOFError, DisplayConnectionError, ConnectionClosedError)
+    delay = 0.25
+    active = None
+    while not stopped.is_set():
+        started = time.monotonic()
+        try:
+            active = factory()
+            if stopped.is_set():
+                return
+            # The stop handler also interrupts the current event loop.
+            active.stop_event = stopped
+            active.run()
+            return
+        except retry_errors:
+            print('[clipboard] Clipboard transport unavailable; reconnecting.', flush=True)
+        finally:
+            if active is not None:
+                active.close()
+                active = None
+        if time.monotonic() - started >= 60:
+            delay = 0.25
+        if stopped.wait(delay):
+            return
+        delay = min(5.0, delay * 2)
 
 
 def main():
     os.umask(0o077)
-    bridge = Bridge()
+    stopped = threading.Event()
     def stop(_signum, _frame):
-        bridge.stopping = True
+        stopped.set()
+    # Register before opening X so shutdown also cancels startup retries.
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    bridge.run()
+    run_service(stopped)
 
 
 if __name__ == '__main__':

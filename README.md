@@ -3,6 +3,11 @@
 A Chromium desktop with software WebAuthn authenticators and native FIDO relay,
 built with Rust and React / Material UI. The web interface remains in Chinese.
 
+The Compose `.data` directory must belong exclusively to this service; never share
+it with a concurrently running container or Chromium. Compose explicitly enables
+safe, narrowly scoped singleton-link recovery after container recreation; see
+[profile ownership and storage](docs/runtime-storage.md#exclusive-profile-ownership-and-container-recreation).
+
 ## Quick start
 
 For a new deployment:

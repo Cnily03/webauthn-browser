@@ -109,7 +109,7 @@ pnpm --dir web test src/ClipboardSync.test.tsx src/clipboard.test.ts
 pnpm --dir web run typecheck
 pnpm --dir web run build
 cargo test --locked --bin webauthn-browser relay::clipboard
-python3 -m unittest discover -s tests -p 'clipboard_bridge_test.py'
+python3 -m unittest discover -s tests -p '*clipboard*test.py'
 ```
 
 The frontend regression reproduces a six-hour live desktop whose clipboard-only
@@ -122,7 +122,16 @@ reads, immediate writes, gesture fallback, bounds and no retained payloads.
 
 Rust relay tests cover transport-only heartbeat, matching/missing Pong and
 revocation; Python bridge fixtures cover selection/request cancellation and
-controller ownership. These synthetic checks do not establish real X11,
+controller ownership. `clipboard_recovery_test.py` additionally injects display
+construction/extension/window/flush/sync failures, event/read/select failures,
+partial-listener and cleanup failures, replacement socket generations, bounded
+retry delays and shutdown cancellation. It verifies that all old request and
+payload state is discarded before a replacement session. The focused bridge
+protocol/recovery suites pass 40 tests. Another 12
+`clipboard_supervisor_test.py` fixtures cover clipboard-only process replacement,
+backoff, failed exec, stop/startup cancellation, no duplicate child, unchanged
+profile epochs/data and mandatory desktop failure handling. These results do not
+claim an actual X server restart. These synthetic checks do not establish real X11,
 reverse-proxy or browser-permission behavior. Complete the scoped, long-lived,
 Chrome/Firefox/Safari acceptance in [docs/clipboard.md](docs/clipboard.md) on a
 Docker/browser-capable host before claiming end-to-end clipboard acceptance.
@@ -643,3 +652,23 @@ credentials. They do not establish real Chromium/relying-party, physical
 USB/BLE, Docker, or native macOS acceptance. Frontend, extension and helper
 sources are unchanged; their separate suites are not rerun for this Rust-only
 route-extraction fix.
+
+### Container recreation and viewer recovery
+
+`python3 tests/browser_profile_lock_test.py` covers exclusive-profile recovery of
+foreign-host Chromium singleton links, data preservation, persistent guard
+contention, a visible live profile process, same-host live PID, mocked active
+socket refusal, malformed/changed links, lock-last interruption/retry, and the
+supervisor's guarded prelaunch call. Socket probes are mocked in this unit suite;
+it is not evidence of a real Chromium or Docker restart.
+
+`pnpm --dir web test src/ProfileApp.test.tsx -t 'rotated CSRF|disconnected|real disconnect'`
+covers an offline disconnect followed by a gateway CSRF rotation, explicit viewer
+reacquisition and a new remote desktop, without replaying a manual restart.
+The CSRF rotation regression fails against the prior hook and passes with the fix.
+
+Deployment acceptance still requires `docker compose down` / `docker compose up`
+on a backed-up, exclusively owned data directory: preserve tabs and stored data,
+confirm the browser becomes available, and confirm no stale-singleton refusal or
+clipboard cleanup traceback blocks startup. Do not perform this acceptance test
+against shared or unconfirmed user data.

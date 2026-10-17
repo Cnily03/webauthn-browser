@@ -39,7 +39,7 @@ if _browser_cdp is None:
 
 
 _profile_modules = {}
-for _name in ("profile_context", "profile_wire", "profile_resources", "display_size"):
+for _name in ("profile_context", "profile_wire", "profile_resources", "display_size", "browser_profile_lock"):
     _spec = importlib.util.spec_from_file_location(f"auth_browser_{_name}", Path(__file__).with_name(f"{_name}.py"))
     if not _spec.origin or not Path(_spec.origin).exists():
         continue
@@ -199,6 +199,7 @@ class Supervisor:
     def __init__(self, no_sandbox=False):
         self.no_sandbox = no_sandbox
         self.children = []
+        self.profile_guard = None
         self.stopping = False
         self.control = None
         self.profile_control = None
@@ -224,6 +225,10 @@ class Supervisor:
         self.browser_healthy_since = None
         self.browser_probe_at = 0.0
         self.browser_crash_recovery = False
+        self.clipboard_started = False
+        self.clipboard_retry_at = None
+        self.clipboard_backoff = 1.0
+        self.clipboard_healthy_since = None
         self.reset_extension_upgrade()
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -435,6 +440,51 @@ class Supervisor:
             # A living browser with a disconnected helper is not killed here.
             self.browser_unavailable(error)
 
+    def clipboard_ready(self):
+        child = next((p for name, p in self.children if name == "clipboard bridge"), None)
+        return (child is not None and child.poll() is None
+                and (RUN_PATH / "clipboard.sock").is_socket())
+
+    def clipboard_recovery_allowed(self):
+        return (self.clipboard_started and not self.stopping
+                and (self.profile_deadline is None or time.monotonic() < self.profile_deadline)
+                and any(name == "Xvfb" and child.poll() is None for name, child in self.children))
+
+    def maintain_clipboard(self):
+        """Recover the optional transport without changing browser ownership."""
+        if not self.clipboard_recovery_allowed():
+            return
+        now = time.monotonic()
+        child = next((p for name, p in self.children if name == "clipboard bridge"), None)
+        if child is not None and child.poll() is not None:
+            # The bridge owns no descendants. poll() already proved its exit;
+            # never signal a retired PID/group that could have been reused.
+            # Clipboard failure must not rotate profile/browser/FIDO epochs.
+            child.wait()
+            self.children = [(name, p) for name, p in self.children if p is not child]
+            self.clipboard_retry_at = now + self.clipboard_backoff
+            self.clipboard_backoff = min(30.0, self.clipboard_backoff * 2)
+            self.clipboard_healthy_since = None
+            print("[supervisor] Clipboard bridge exited; restarting automatically.", file=sys.stderr, flush=True)
+        if self.clipboard_retry_at is not None and now >= self.clipboard_retry_at:
+            # A signal or startup cancellation may arrive while reaping.
+            if not self.clipboard_recovery_allowed():
+                return
+            try:
+                self.spawn("clipboard bridge", [sys.executable, "/opt/webauthn-browser/runtime/clipboard_bridge.py"])
+            except OSError:
+                self.clipboard_retry_at = now + self.clipboard_backoff
+                self.clipboard_backoff = min(30.0, self.clipboard_backoff * 2)
+                print("[supervisor] Clipboard bridge restart failed; retrying automatically.", file=sys.stderr, flush=True)
+                return
+            self.clipboard_retry_at = None
+        if not self.clipboard_ready():
+            self.clipboard_healthy_since = None
+        elif self.clipboard_healthy_since is None:
+            self.clipboard_healthy_since = now
+        elif now - self.clipboard_healthy_since >= 60:
+            self.clipboard_backoff = 1.0
+
     def check_children(self, require_browser=True):
         if self.profile_control is not None:
             self.serve_profile_control()
@@ -451,11 +501,16 @@ class Supervisor:
             if result is not None:
                 if name == "gateway" and self.gateway_started:
                     continue
+                if name == "clipboard bridge" and self.clipboard_started:
+                    continue
                 if name == "Chromium":
                     if require_browser:
                         raise BrowserUnavailable(f"Chromium exited with status {result}. {self.browser_failure()}")
                     continue
                 raise RuntimeError(f"{name} exited with status {result}.")
+        # Mandatory desktop failures retain their existing teardown path;
+        # never restart clipboard against an exited display or window manager.
+        self.maintain_clipboard()
         if self.stopping:
             raise InterruptedError("shutdown requested")
 
@@ -581,6 +636,9 @@ class Supervisor:
             return connection.recv(12).startswith(b"RFB ")
 
     def shutdown(self, desktop_only=False):
+        self.clipboard_started = False
+        self.clipboard_retry_at = None
+        self.clipboard_healthy_since = None
         if self.fido_control is not None:
             if desktop_only:
                 self.fido_control.retire("browser")
@@ -612,6 +670,10 @@ class Supervisor:
                 pass
             child.wait()
         self.release_browser_pipe()
+        if not desktop_only and self.profile_guard is not None:
+            for descriptor in reversed(self.profile_guard):
+                os.close(descriptor)
+            self.profile_guard = None
         if desktop_only:
             self.children = [(name, child) for name, child in self.children if name == "gateway"]
 
@@ -649,7 +711,11 @@ class Supervisor:
                 control_diagnostic("resize", error.code, warning=True)
         self.spawn("Openbox", ["openbox", "--sm-disable"])
         self.spawn("clipboard bridge", [sys.executable, "/opt/webauthn-browser/runtime/clipboard_bridge.py"])
-        self.wait_ready("clipboard bridge", lambda: (RUN_PATH / "clipboard.sock").is_socket())
+        self.clipboard_started = True
+        self.clipboard_retry_at = None
+        self.clipboard_backoff = 1.0
+        self.clipboard_healthy_since = None
+        self.wait_ready("clipboard bridge", self.clipboard_ready)
         self.spawn("x11vnc", [
             "x11vnc", "-display", DISPLAY, "-listen", "127.0.0.1", "-localhost",
             "-rfbport", str(VNC_PORT), "-forever", "-shared", "-nopw", "-noxdamage", "-nosel", "-xrandr",
@@ -715,6 +781,12 @@ class Supervisor:
         self.release_browser_pipe()
         if self.browser_pipe is not None:
             raise BrowserUnavailable("Browser is still running.")
+        if self.profile_guard is not None:
+            recovered = _profile_modules["browser_profile_lock"].recover_locked(
+                PROFILE_PATH, self.profile_guard[0],
+                confirmed_exclusive=os.environ.get("AUTH_BROWSER_EXCLUSIVE_PROFILE") == "true")
+            if recovered:
+                print("[supervisor] Recovered stale Chromium singleton links for the explicitly exclusive profile.", flush=True)
         self.browser_epoch = secrets.token_hex(16)
         self.browser_operations.clear()
         self.reset_extension_upgrade()
@@ -1161,6 +1233,7 @@ class Supervisor:
             if os.environ.get(key) != expected[key]:
                 raise ValueError("Profile environment does not match its immutable identity")
         paths.prepare()
+        self.profile_guard = _profile_modules["browser_profile_lock"].acquire(paths.profile)
         wire = _profile_modules["profile_wire"]
         channel = socket.socket(fileno=fd)
         if channel.family != socket.AF_UNIX or channel.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_SEQPACKET:

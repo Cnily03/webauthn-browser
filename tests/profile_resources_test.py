@@ -1,5 +1,6 @@
 """Real disposable process reconciliation; no named sockets, X servers or browsers."""
 import importlib.util
+import errno
 import io
 import json
 import os
@@ -524,6 +525,134 @@ class ResourceTests(unittest.TestCase):
         self.assertFalse((resources.DISPLAY_ROOT/'default.json').exists())
         self.assertEqual(manager.stopped_epochs['default'], self.manifest['runtime_epoch'])
         manager.shutdown()
+
+    def retained_restart(self, *, previous_boot=False, with_lease=True):
+        if with_lease:
+            child = self.spawn()
+            resources.record_display(self.paths.runtime, self.manifest['runtime_epoch'],
+                                     self.manifest['generation'], child.pid, self.paths.slot)
+            child.terminate(); child.wait(timeout=2)
+        self.manifest['pid_namespace'] = 'pid:[previous-container]'
+        if previous_boot:
+            self.manifest['boot'] = 'previous-host-boot'
+        (self.paths.runtime/resources.MANIFEST).write_text(json.dumps(self.manifest))
+        if with_lease:
+            lease = resources.read_display('default')
+            lease.update({key: self.manifest[key] for key in ('boot', 'pid_namespace')})
+            (resources.DISPLAY_ROOT/'default.json').write_text(json.dumps(lease))
+        manager = manager_module.ProfileManager(roots=self.roots)
+        manager.acquire_manager_lock(self.root/'manager.lock')
+        self.addCleanup(manager.shutdown)
+        return manager
+
+    def test_retained_full_manifest_restart_cleans_only_transients_without_signals(self):
+        manager = self.retained_restart()
+        data = self.paths.profile/'preserved-cookie'
+        data.write_bytes(b'private fixture')
+        unknown = self.paths.runtime/'unknown-fixture'
+        unknown.write_bytes(b'untouched')
+        status = self.paths.runtime/'runtime.json'
+        status.write_text('{}')
+        with patch.object(resources.signal, 'pidfd_send_signal') as send, \
+                patch.object(resources, 'reconcile') as reconcile, \
+                patch('sys.stdout', new_callable=io.StringIO):
+            manager.startup_cleanup()
+        send.assert_not_called(); reconcile.assert_not_called()
+        self.assertFalse(manager.records)
+        self.assertFalse((self.paths.runtime/resources.MANIFEST).exists())
+        self.assertFalse(status.exists())
+        self.assertFalse((resources.DISPLAY_ROOT/'default.json').exists())
+        self.assertEqual(data.read_bytes(), b'private fixture')
+        self.assertEqual(unknown.read_bytes(), b'untouched')
+        self.assertEqual(manager.stopped_epochs['default'], self.manifest['runtime_epoch'])
+
+    def test_retained_restart_active_socket_stays_reserved(self):
+        manager = self.retained_restart()
+        path = self.paths.runtime/'clipboard.sock'
+        original = Path.lstat
+        def metadata(item, *args, **kwargs):
+            if item == path:
+                return SimpleNamespace(st_uid=os.getuid(), st_mode=stat.S_IFSOCK|0o600,
+                                       st_dev=1, st_ino=2, st_ctime_ns=3)
+            return original(item, *args, **kwargs)
+        with patch.object(Path, 'lstat', metadata), \
+                patch.object(resources.socket, 'socket'), \
+                patch.object(resources.signal, 'pidfd_send_signal') as send, \
+                patch('sys.stdout', new_callable=io.StringIO):
+            manager.startup_cleanup()
+        send.assert_not_called()
+        self.assertEqual(manager.records['default'].cleanup_error, 'retired_socket_active')
+        self.assertTrue((self.paths.runtime/resources.MANIFEST).exists())
+
+    def test_retained_socket_probe_requires_absence_and_unchanged_inode(self):
+        self.retained_restart()
+        path = self.paths.runtime/'clipboard.sock'
+        original = Path.lstat
+        changed = [False]
+        def metadata(item, *args, **kwargs):
+            if item == path:
+                return SimpleNamespace(st_uid=os.getuid(), st_mode=stat.S_IFSOCK|0o600,
+                                       st_dev=1, st_ino=3 if changed[0] else 2, st_ctime_ns=3)
+            return original(item, *args, **kwargs)
+        for code in (errno.ECONNREFUSED, errno.ENOENT, errno.EACCES):
+            with self.subTest(errno=code), patch.object(Path, 'lstat', metadata), \
+                    patch.object(resources.socket, 'socket') as factory:
+                factory.return_value.__enter__.return_value.connect.side_effect = OSError(code, 'fixture')
+                if code == errno.EACCES:
+                    with self.assertRaisesRegex(resources.ResourceError, 'retired_socket_unconfirmed'):
+                        resources.confirm_retired_transient(self.paths, self.manifest, time.monotonic()+1)
+                else:
+                    resources.confirm_retired_transient(self.paths, self.manifest, time.monotonic()+1)
+        def replaced(_):
+            changed[0] = True
+            raise OSError(errno.ECONNREFUSED, 'fixture')
+        with patch.object(Path, 'lstat', metadata), patch.object(resources.socket, 'socket') as factory:
+            factory.return_value.__enter__.return_value.connect.side_effect = replaced
+            with self.assertRaisesRegex(resources.ResourceError, 'transient_resource_changed'):
+                resources.confirm_retired_transient(self.paths, self.manifest, time.monotonic()+1)
+        self.assertTrue((self.paths.runtime/resources.MANIFEST).exists())
+
+    def test_retained_restart_without_same_boot_lease_or_lock_remains_blocked(self):
+        manager = self.retained_restart(with_lease=False)
+        with patch('sys.stdout', new_callable=io.StringIO):
+            manager.startup_cleanup()
+        self.assertIn('default', manager.records)
+        self.assertTrue((self.paths.runtime/resources.MANIFEST).exists())
+        manager.shutdown()
+        # An exclusive manager lock is required even when the host boot differs;
+        # foreign namespace metadata alone is never deletion authority.
+        self.manifest['boot'] = 'previous-host-boot'
+        (self.paths.runtime/resources.MANIFEST).write_text(json.dumps(self.manifest))
+        second = manager_module.ProfileManager(roots=self.roots)
+        self.addCleanup(second.shutdown)
+        with patch('sys.stdout', new_callable=io.StringIO):
+            second.startup_cleanup()
+        self.assertEqual(second.records['default'].cleanup_error, 'ownership_unconfirmed')
+        self.assertTrue((self.paths.runtime/resources.MANIFEST).exists())
+
+    def test_retained_host_reboot_manifest_without_display_lease_stays_blocked(self):
+        manager = self.retained_restart(previous_boot=True, with_lease=False)
+        with patch.object(resources.signal, 'pidfd_send_signal') as send, \
+                patch('sys.stdout', new_callable=io.StringIO):
+            manager.startup_cleanup()
+        send.assert_not_called()
+        self.assertIn('default', manager.records)
+        self.assertTrue((self.paths.runtime/resources.MANIFEST).exists())
+
+    def test_retained_restart_refuses_live_reused_generation_and_changed_lease(self):
+        manager = self.retained_restart()
+        live = self.spawn()
+        with patch('sys.stdout', new_callable=io.StringIO):
+            manager.startup_cleanup()
+        self.assertEqual(manager.records['default'].cleanup_error, 'retired_generation_still_live')
+        self.assertIsNone(live.poll())
+        live.terminate(); live.wait(timeout=2)
+        lease = resources.read_display('default')
+        lease['generation'] = 'f'*64
+        (resources.DISPLAY_ROOT/'default.json').write_text(json.dumps(lease))
+        with self.assertRaisesRegex(resources.ResourceError, 'display_generation_changed'):
+            resources.confirm_retired_transient(self.paths, self.manifest, time.monotonic()+1)
+        self.assertTrue((self.paths.runtime/resources.MANIFEST).exists())
 
     def test_cleaned_empty_runtime_directory_is_proved_after_manager_restart(self):
         resources.remove_transient(self.paths, self.manifest)
