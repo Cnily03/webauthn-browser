@@ -1,0 +1,70 @@
+name: Docker
+
+on:
+
+  workflow_dispatch:
+    inputs:
+      image:
+        description: "Docker image name and tag"
+        required: true
+        default: "webauthn-browser:latest"
+      publish_tag:
+        description: "ghcr.io TAG"
+        required: false
+
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # Build and export the docker image
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Build
+        id: build
+        run: |
+          image="$(echo ${{ inputs.image }} | tr -d '[:space:]')"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+          echo "Building: $image"
+          docker build -t "$image" .
+
+      - name: Export image
+        id: export
+        run: |
+          image='${{ steps.build.outputs.image }}'
+          output_fn="$(echo "$image" | tr ':' '_')"
+          echo "output_fn=$output_fn" >> "$GITHUB_OUTPUT"
+          docker save "$image" -o '${{ runner.temp }}/image.tar'
+          sha256sum '${{ runner.temp }}/image.tar' > '${{ runner.temp }}/image.tar.sha256'
+
+      - name: Upload artifact
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.export.outputs.output_fn }}
+          path: |
+            ${{ runner.temp }}/image.tar
+            ${{ runner.temp }}/image.tar.sha256
+          compression-level: 9
+          retention-days: 1
+
+      - name: Push to ghcr
+        if: ${{ inputs.publish_tag != '' }}
+        run: |
+          image="${{ steps.build.outputs.image }}"
+          echo "Pushing: $image"
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          push_image="ghcr.io/${{ github.repository }}:${{ inputs.publish_tag }}"
+          push_image="$(echo "$push_image" | tr '[:upper:]' '[:lower:]')"
+          docker tag "$image" "$push_image"
+          docker push "$push_image"
+          echo "Pushed: $image to $push_image"
